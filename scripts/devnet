@@ -29,11 +29,15 @@ cp -af "$BASEDIR/config/genesis/" "$TARGETDIR"
 cp -af "$BASEDIR/config/protocol-parameters.json" "$TARGETDIR"
 
 # Copy faucet keys, address to the jambhala assets directory
+echo "Copying faucet keys into jambhala assets directory"
 if [[ -v PROJECT_ROOT ]]; then
-    echo "Copying faucet keys into jambhala assets directory"
     cp $BASEDIR/config/credentials/faucet.vkey $PROJECT_ROOT/cardano-cli-guru/assets/keys
     cp $BASEDIR/config/credentials/faucet.skey $PROJECT_ROOT/cardano-cli-guru/assets/keys
     cp $BASEDIR/config/credentials/faucet.addr $PROJECT_ROOT/cardano-cli-guru/assets/addr
+else
+    cp $BASEDIR/config/credentials/faucet.vkey ./cardano-cli-guru/assets/keys
+    cp $BASEDIR/config/credentials/faucet.skey ./cardano-cli-guru/assets/keys
+    cp $BASEDIR/config/credentials/faucet.addr ./cardano-cli-guru/assets/addr
 fi
 
 # Update start time params

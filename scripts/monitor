@@ -27,25 +27,26 @@ let currentSlot = 0
 // Load known addresses
 const knownAddresses = {} // name lookup by address
 const knownNames = {} // address lookup by name
-if (process.env.PROJECT_ROOT === undefined) {
-  // Standalone
-} else {
+let CARDANO_CLI_GURU = "./cardano-cli-guru"
+if (process.env.PROJECT_ROOT !== undefined) {
   // Running under Jambhala environment
-  const JAMBHALA_ADDRESSES = process.env.PROJECT_ROOT + "/cardano-cli-guru/assets/addr"
-  const files = fs.readdirSync(JAMBHALA_ADDRESSES)
-  files.forEach((file, index) => {
-    const name = path.basename(file, '.addr')
-    const ext = path.extname(file)
-    if (ext === ".addr") {
-      const addressFile = path.join(JAMBHALA_ADDRESSES, file)
-      const addr = fs.readFileSync(addressFile).toString()
-      knownAddresses[name] = addr
-      knownNames[addr] = name
-    }
-  })
+  let CARDANO_CLI_GURU = process.env.PROJECT_ROOT + "/cardano-cli-guru"
   // Load Jambhala protocol params
   const params = JSON.parse(fs.readFileSync(process.env.PARAMS_PATH))
 }
+
+const CLI_ADDRESSES = CARDANO_CLI_GURU + "/assets/addr"
+const files = fs.readdirSync(CLI_ADDRESSES)
+files.forEach((file, index) => {
+  const name = path.basename(file, '.addr')
+  const ext = path.extname(file)
+  if (ext === ".addr") {
+    const addressFile = path.join(CLI_ADDRESSES, file)
+    const addr = fs.readFileSync(addressFile).toString()
+    knownAddresses[name] = addr
+    knownNames[addr] = name
+  }
+})
 
 // Used to store indexed transactions by utxo ref. Since this is just a local devnet
 // we're not concerned about the size of this mapping. On a global testnet or the

@@ -1,6 +1,6 @@
 # Cardano Devnet
 
-This repository creates a completely local Cardano network that runs only on the development machine, with average block times that can be specified as a number of seconds from the command line.  It has been built to work as a submodule under the [Jambhala](https://github.com/iburzynski/jambhala) framework. 
+This repository creates a completely local Cardano network that runs only on the development machine, with average block times that can be specified as a number of seconds from the command line.  It has been built to work as a submodule under the [Jambhala](https://github.com/iburzynski/jambhala) framework, but the devnet and monitor scripts will work as standalone utilities as well.
 
 There are several additional features included in addition to a locally running node:
 

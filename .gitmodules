@@ -1,0 +1,3 @@
+[submodule "cardano-cli-guru"]
+	path = cardano-cli-guru
+	url = https://github.com/iburzynski/cardano-cli-guru
