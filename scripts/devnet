@@ -22,9 +22,8 @@ else
     BASEDIR=$PROJECT_ROOT/cardano-devnet
 fi
 TARGETDIR="$BASEDIR/target"
-CARDANO_NODE_SOCKET_PATH="$TARGETDIR/node.socket"
 
-[ -d "$TARGETDIR" ] && { echo "Cleaning up directory $TARGETDIR" ; sudo rm -r $TARGETDIR ; }
+[ -d "$TARGETDIR" ] && { echo "Cleaning up directory $TARGETDIR" ; rm -rf $TARGETDIR ; }
 
 cp -af "$BASEDIR/config/genesis/" "$TARGETDIR"
 cp -af "$BASEDIR/config/protocol-parameters.json" "$TARGETDIR"

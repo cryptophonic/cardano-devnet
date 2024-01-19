@@ -24,29 +24,33 @@ const LUCID_PORT = 1338
 let currentBlockHash = ""
 let currentSlot = 0
 
-// Load Jambhala addresses
-const JAMBHALA_ADDRESSES = process.env.PROJECT_ROOT + "/cardano-cli-guru/assets/addr"
-const jambhalaAddresses = {} // name lookup by address
-const jambhalaNames = {} // address lookup by name
-const files = fs.readdirSync(JAMBHALA_ADDRESSES)
-files.forEach((file, index) => {
-  const name = path.basename(file, '.addr')
-  const ext = path.extname(file)
-  if (ext === ".addr") {
-    const addressFile = path.join(JAMBHALA_ADDRESSES, file)
-    const addr = fs.readFileSync(addressFile).toString()
-    jambhalaAddresses[name] = addr
-    jambhalaNames[addr] = name
-  }
-})
-
-// Load Jambhala protocol params
-const params = JSON.parse(fs.readFileSync(process.env.PARAMS_PATH))
+// Load known addresses
+const knownAddresses = {} // name lookup by address
+const knownNames = {} // address lookup by name
+if (process.env.PROJECT_ROOT === undefined) {
+  // Standalone
+} else {
+  // Running under Jambhala environment
+  const JAMBHALA_ADDRESSES = process.env.PROJECT_ROOT + "/cardano-cli-guru/assets/addr"
+  const files = fs.readdirSync(JAMBHALA_ADDRESSES)
+  files.forEach((file, index) => {
+    const name = path.basename(file, '.addr')
+    const ext = path.extname(file)
+    if (ext === ".addr") {
+      const addressFile = path.join(JAMBHALA_ADDRESSES, file)
+      const addr = fs.readFileSync(addressFile).toString()
+      knownAddresses[name] = addr
+      knownNames[addr] = name
+    }
+  })
+  // Load Jambhala protocol params
+  const params = JSON.parse(fs.readFileSync(process.env.PARAMS_PATH))
+}
 
 // Used to store indexed transactions by utxo ref. Since this is just a local devnet
 // we're not concerned about the size of this mapping. On a global testnet or the
 // mainnet, a production indexer should be used.
-const jambhalaTransactions = {}
+const indexedTransations = {}
 
 // Terminal output
 const screen = blessed.screen({
@@ -163,8 +167,8 @@ const formatTx = tx => {
   for (var i = 0; i < tx.inputs.length; i++) {
     const input = tx.inputs[i]
     const key = input.transaction.id + "#" + input.index
-    if (jambhalaTransactions[key] !== undefined) {
-      const [n, v] = jambhalaTransactions[key]
+    if (indexedTransations[key] !== undefined) {
+      const [n, v] = indexedTransations[key]
       const lStr = "#" + input.index + ": " + n
       const vStr = "  ₳ " + v
       str += lStr + " ".repeat(64 - lStr.length - vStr.length) + colorValue(vStr)
@@ -174,8 +178,8 @@ const formatTx = tx => {
     if (tx.outputs[i] !== undefined) {
       const output = tx.outputs[i]
       let line = "#" + i + ": "
-      if (jambhalaNames[output.address] !== undefined) {
-        line += jambhalaNames[output.address]
+      if (knownNames[output.address] !== undefined) {
+        line += knownNames[output.address]
       }
       const value = output.value.ada.lovelace / 1000000.0
       const vStr = "₳ " + value.toFixed(6)
@@ -197,8 +201,8 @@ const formatTx = tx => {
   for (var i = tx.inputs.length; i < tx.outputs.length; i++) {
     const output = tx.outputs[i]
     let line = "#" + i + ": "
-    if (jambhalaNames[output.address] !== undefined) {
-      line += jambhalaNames[output.address]
+    if (knownNames[output.address] !== undefined) {
+      line += knownNames[output.address]
     }
     const value = output.value.ada.lovelace / 1000000.0
     const vStr = "₳ " + value.toFixed(6)
@@ -363,8 +367,8 @@ class OgmiosStateMachine {
         tx.outputs.forEach((output, index) => {
           const value = output.value.ada.lovelace / 1000000.0
           indexer.produceUtxo(tx.id, index, output.address, output.value, output.datum, output.script)
-          if (jambhalaNames[output.address] !== undefined) {
-            jambhalaTransactions[tx.id + "#" + index] = [jambhalaNames[output.address], value]
+          if (knownNames[output.address] !== undefined) {
+            indexedTransations[tx.id + "#" + index] = [knownNames[output.address], value]
           }
         })
       })
