@@ -104,7 +104,7 @@ Assuming you started both the indexer with the "-i" option, and the explorer wit
 
 ### Cardano CLI Guru
 
-This project uses [cardano-cli-guru](https://github.com/iburzynski/cardano-cli-guru), a submodule under the [jambhala](https://github.com/iburzynski/jambhala) framework, automatically for the creation of human readable address aliases (i.e. *alice* instead of *addr_test1vqhuqk8f0whng7zyp76526w50dx3u4f2jw5t86jg4h4gzkqyj9yzv*)
+This project uses a minor fork of [cardano-cli-guru](https://github.com/iburzynski/cardano-cli-guru), a submodule under the [jambhala](https://github.com/iburzynski/jambhala) framework, automatically for the creation of human readable address aliases (i.e. *alice* instead of *addr_test1vqhuqk8f0whng7zyp76526w50dx3u4f2jw5t86jg4h4gzkqyj9yzv*)
 
 ### Live blockchain monitor
 
