@@ -100,6 +100,10 @@ The examples directory contains a few different examples of smart contracts that
 
 Assuming you started both the indexer with the "-i" option, and the explorer with the "-e" option when running start-cardano-devnet, or alternatively you are running them separately using the ```indexer``` and ```explorer``` scripts in separate sessions, you should be able to connect to ```http://localhost:5173``` with a browser to explore the chain live as it runs.
 
+### Fire up a hydra head
+
+You can now set up a local hydra head from right within cardano-devnet. Follow the README instructions in the hydra directory.
+
 ## Description of project components
 
 ### Cardano CLI Guru
