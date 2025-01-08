@@ -1,8 +1,9 @@
 #!/bin/sh
 
-rm -rf $HYDRA_ROOT/network
-mkdir -p $HYDRA_ROOT/network
-cp $HYDRA_ROOT/protocol-parameters.json $HYDRA_ROOT/network
+if [ ! -d $HYDRA_ROOT/network ]; then
+  mkdir -p $HYDRA_ROOT/network
+  cp $HYDRA_ROOT/protocol-parameters.json $HYDRA_ROOT/network
+fi
 
 hydra-node publish-scripts \
   --testnet-magic 42 \

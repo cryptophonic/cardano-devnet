@@ -1,5 +1,9 @@
 #!/bin/sh
 
+if [ ! -d $HYDRA_ROOT/network ]; then
+  mkdir -p $HYDRA_ROOT/network
+fi
+
 # Remove any old node configurations
 rm -rf $HYDRA_ROOT/network/node-*
 
@@ -12,12 +16,11 @@ count=10
 for name in "$@"; do
   nodedir="$HYDRA_ROOT/network/node-$name"
   ip=172.16.0.$count
-  mkdir $nodedir
+  mkdir -p $nodedir
   count=$((count+10))
 
   # credentials
   cd $nodedir
-  direnv allow
   if [ ! -f $CARDANO_ASSETS_PATH/keys/$name.skey ]; then
     key-gen $name
   fi
