@@ -19,6 +19,10 @@ $ cd hydra
 $ ./publish_scripts.sh
 ```
 
+![image](https://github.com/user-attachments/assets/1f145b39-23f9-40aa-af4d-6ccad6ec13d0)
+
+*sample publish transaction*
+ 
 Wait for the publish transaction to confirm on the layer 1 terminal.
 
 ## Set up the hydra participants
@@ -50,6 +54,10 @@ running the layer 1 network.
 
 In each terminal press the 'C' key and choose which tx's you want to move into the head for each party by hitting the space bar to mark the transaction with an 'X'.  Hit 'Enter' to confirm these and 
 wait for the transactions get confirmed in the layer 1 for each party. 
+
+![image](https://github.com/user-attachments/assets/c240f3c7-d0c2-4109-aa24-2b83111e729d)
+
+*confirming which transaction to include*
 
 The head is now open!
 
