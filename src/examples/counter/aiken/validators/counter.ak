@@ -1,6 +1,6 @@
 use aiken/cbor
-use aiken/transaction.{
-  InlineDatum, ScriptContext, Spend, find_input, find_script_outputs,
+use cardano/transaction.{
+  OutputReference
 }
 use aiken/transaction/credential.{ScriptCredential}
 use aiken/transaction/value.{quantity_of}
@@ -9,7 +9,23 @@ type CounterDatum {
   count: Int,
 }
 
-validator(validation_token_policy: ByteArray, validation_token_id: ByteArray) {
+validator increment(validation_token_policy: ByteArray, validation_token_id: ByteArray) {
+
+  spend(datum: Option<CounterDatum>, redeemer: Void, own_ref: OutputReference, tx: Transaction) {
+    expect Some(own_input) = list.find(
+      tx.inputs,
+      fn (input) {input.output_reference == own_ref}
+    )
+    expect Script(own_hash) = own_input.output.address.payment_credential
+    expect Some(output) = list.find(
+      tx.outputs,
+      fn (output) {output == own_hash}
+    )
+  }
+
+}
+
+  /*
   fn increment(datum: CounterDatum, _redeemer: Void, ctx: ScriptContext) -> Bool {
     expect Spend(output_reference) = ctx.purpose
     expect Some(own_input) =
@@ -33,6 +49,7 @@ validator(validation_token_policy: ByteArray, validation_token_id: ByteArray) {
     expect nextDatum: CounterDatum = maybe_datum
     nextDatum.count == datum.count + 1
   }
+  */
 }
 
 test make_datum_0() {
