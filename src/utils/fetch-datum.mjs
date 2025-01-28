@@ -1,7 +1,5 @@
 import { Data, Lucid, fromText } from 'lucid-cardano'
 import { LucidProviderFrontend } from '../lucid-frontend.mjs'
-import { loadJambhalaPrivKey, loadJambhalaNativeScript, loadJambhalaPlutusScript } from '../jambhala-utils.mjs'
-import bech32 from 'bech32-buffer'
 
 const main = async () => {
   const provider = new LucidProviderFrontend("ws://localhost:1338")
