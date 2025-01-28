@@ -28,11 +28,14 @@ const main = async () => {
 
   // Get the script address
   const counterScript = JSON.parse(fs.readFileSync("aiken/plutus.json"))
+  const spendValidator = counterScript.validators.find(v => {
+    return v.title === "counter.increment.spend"
+  })
   const validator = {
     type: "PlutusV2",
-    script: applyParamsToScript(counterScript.validators[0].compiledCode, [
-      policyId, fromText("counter-token")
-    ])
+    script: applyParamsToScript(spendValidator.compiledCode, 
+      [ policyId, fromText("counter-token") ]
+    )
   }
   const scriptAddr = lucid.utils.validatorToAddress(validator)
   console.log("Script address=" + scriptAddr)
