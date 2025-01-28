@@ -1,4 +1,22 @@
-import { C, PROTOCOL_PARAMETERS_DEFAULT } from "lucid-cardano"
+import fs from 'fs'
+import { CML, PROTOCOL_PARAMETERS_DEFAULT } from '@lucid-evolution/lucid'
+import WebSocket from 'ws'
+
+BigInt.prototype["toJSON"] = function () {
+  return this.toString() + "n";
+}
+
+function replaceAmountsWithBigInt(obj) {
+  obj.map(o => {
+    o.assets = Object.keys(o.assets).reduce((bcc, k) => {
+      bcc[k] = BigInt(o.assets[k])
+      return bcc
+    }, {})
+    return o
+  })
+  //console.log("1: " + JSON.stringify(obj, null, 2))
+  return obj
+}
 
 export class LucidProviderFrontend {
 
@@ -60,20 +78,18 @@ export class LucidProviderFrontend {
           address: addressOrCredential
         }
       })
-      //console.log(JSON.stringify(obj, null, 2))
-      return obj
+      return replaceAmountsWithBigInt(obj)
     } else {
       const credentialBech32 = addressOrCredential.type === "Key"
-        ? C.Ed25519KeyHash.from_hex(addressOrCredential.hash).to_bech32("addr_test") :
-        C.ScriptHash.from_hex(addressOrCredential.hash).to_bech32("addr_test")
+        ? CML.Ed25519KeyHash.from_hex(addressOrCredential.hash).to_bech32("addr_test") :
+        CML.ScriptHash.from_hex(addressOrCredential.hash).to_bech32("addr_test")
       const obj = await this.query({
         method: "getUtxos",
         params: {
           credential: credentialBech32
         }
       })
-      //console.log(JSON.stringify(obj, null, 2))
-      return obj
+      return replaceAmountsWithBigInt(obj)
     }
   }
 
@@ -86,12 +102,11 @@ export class LucidProviderFrontend {
           unit: unit
         }
       })
-      //console.log(JSON.stringify(obj, null, 2))
-      return obj
+      return replaceAmountsWithBigInt(obj)
     } else {
       const credentialBech32 = addressOrCredential.type === "Key"
-        ? C.Ed25519KeyHash.from_hex(addressOrCredential.hash).to_bech32("addr_test") :
-        C.ScriptHash.from_hex(addressOrCredential.hash).to_bech32("addr_test")
+        ? CML.Ed25519KeyHash.from_hex(addressOrCredential.hash).to_bech32("addr_test") :
+        CML.ScriptHash.from_hex(addressOrCredential.hash).to_bech32("addr_test")
       const obj = await this.query({
         method: "getUtxosWithUnit",
         params: {
@@ -99,8 +114,7 @@ export class LucidProviderFrontend {
           unit: unit
         }
       })
-      //console.log(JSON.stringify(obj, null, 2))
-      return obj
+      return replaceAmountsWithBigInt(obj)
     }
   }
 
@@ -123,4 +137,5 @@ export class LucidProviderFrontend {
     })
   }
 
-}
+} 
+
