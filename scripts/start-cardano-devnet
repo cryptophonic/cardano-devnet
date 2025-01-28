@@ -151,8 +151,8 @@ if [ -n "$START_INDEXER" ]; then
   if [ -n "$START_MONITOR" ]; then
     node $DEVNET_ROOT/src/devnet/indexer.mjs > /dev/null 2>&1 &
   else 
-    # If we're not starting the monitor then put indexer in foreground
-    node $DEVNET_ROOT/src/devnet/indexer.mjs
+    # If we're not starting the monitor then put output to console
+    node $DEVNET_ROOT/src/devnet/indexer.mjs &
   fi
   INDEXER_PID=$!
 fi

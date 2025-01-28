@@ -1,10 +1,10 @@
-import { Data, Lucid, fromText } from 'lucid-cardano'
+import { Lucid } from '@lucid-evolution/lucid'
 import { LucidProviderFrontend } from '../lucid-frontend.mjs'
 
 const main = async () => {
   const provider = new LucidProviderFrontend("ws://localhost:1338")
   await provider.init()
-  const lucid = await Lucid.new(provider, "Custom")
+  const lucid = await Lucid(provider, "Custom")
 
   const [hash, index] = process.argv[2].split("#")
 
