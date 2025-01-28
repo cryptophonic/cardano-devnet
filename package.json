@@ -4,6 +4,7 @@
   "main": "index.js",
   "license": "MIT",
   "dependencies": {
+    "@lucid-evolution/lucid": "^0.4.20",
     "bech32-buffer": "^0.2.1",
     "blake2": "^4.1.1",
     "blessed": "^0.1.81",
@@ -11,7 +12,6 @@
     "cbor-x": "^1.5.8",
     "express": "^4.18.3",
     "liquidjs": "^10.10.1",
-    "lucid-cardano": "^0.10.7",
     "svelte-copy": "^1.4.2",
     "ws": "^8.11.0"
   }
