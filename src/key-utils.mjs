@@ -1,3 +1,4 @@
+import fs from 'fs'
 import { decode as decodeCbor } from 'cbor-x'
 import bech32 from 'bech32-buffer'
 

@@ -1,6 +1,15 @@
 import fs from 'fs'
 
-import { Data, Lucid, fromText, applyParamsToScript } from 'lucid-cardano'
+import {
+  Lucid,
+  Data,
+  scriptFromNative,
+  mintingPolicyToId,
+  fromText,
+  applyParamsToScript,
+  applyDoubleCborEncoding,
+  validatorToAddress
+} from '@lucid-evolution/lucid'
 import { LucidProviderFrontend } from '../../lucid-frontend.mjs'
 import { loadPrivateKey } from '../../key-utils.mjs'
 
@@ -16,14 +25,14 @@ const zeroState = { counter: 0n }
 const main = async () => {
   const provider = new LucidProviderFrontend("ws://localhost:1338")
   await provider.init()
-  const lucid = await Lucid.new(provider, "Custom")
+  const lucid = await Lucid(provider, "Custom")
 
-  lucid.selectWalletFromPrivateKey(loadPrivateKey("owner"))
+  lucid.selectWallet.fromPrivateKey(loadPrivateKey("owner"))
 
   // Get the state token policyId
   const script = JSON.parse(fs.readFileSync("state-token.script"))
-  const mintingPolicy = lucid.utils.nativeScriptFromJson(script)
-  const policyId = lucid.utils.mintingPolicyToId(mintingPolicy)
+  const mintingPolicy = scriptFromNative(script)
+  const policyId = mintingPolicyToId(mintingPolicy)
   const unit = policyId + fromText("counter-token")
 
   // Get the script address
@@ -33,11 +42,12 @@ const main = async () => {
   })
   const validator = {
     type: "PlutusV2",
-    script: applyParamsToScript(spendValidator.compiledCode, 
+    script: applyParamsToScript(
+      spendValidator.compiledCode,
       [ policyId, fromText("counter-token") ]
     )
   }
-  const scriptAddr = lucid.utils.validatorToAddress(validator)
+  const scriptAddr = validatorToAddress("Custom", validator)
   console.log("Script address=" + scriptAddr)
 
   // Serialize the counter = 0 state to CBOR
@@ -48,7 +58,7 @@ const main = async () => {
 
     // Create a utxo with counter = 0 and the state NFT token attached
     const tx = await lucid.newTx()
-      .payToContract(scriptAddr, { inline: datum }, { [unit]: 1n })
+      .pay.ToContract(scriptAddr, { inline: datum }, { [unit]: 1n })
       .complete()
 
     const signedTx = await tx.sign().complete()

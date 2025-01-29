@@ -1,17 +1,14 @@
 import fs from 'fs'
-import { Lucid, CML, SLOT_CONFIG_NETWORK } from '@lucid-evolution/lucid'
+import { 
+  Lucid, 
+  CML 
+} from '@lucid-evolution/lucid'
 import { decode as decodeCbor } from 'cbor-x'
 import { LucidProviderFrontend } from '../lucid-frontend.mjs'
 
 const wallet_name = process.argv[2]
 const value = BigInt(Math.floor(process.argv[3] * 1000000.0))
 console.log("Funding wallet: " + wallet_name + " with " + value + " lovelace")
-
-SLOT_CONFIG_NETWORK['Custom'] = {
-  zeroTime: new Date().getTime(), 
-  zeroSlot: 0,
-  slotLength: 1000,
-}
 
 const main = async () => {
   const provider = new LucidProviderFrontend("ws://localhost:1338")
