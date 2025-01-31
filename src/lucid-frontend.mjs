@@ -60,8 +60,19 @@ export class LucidProviderFrontend {
     })
   }
 
-  getProtocolParameters() {
-    return PROTOCOL_PARAMETERS_DEFAULT
+  async getProtocolParameters() {
+    const obj = await this.query({
+      method: "queryProtocolParameters"
+    })
+    const def = PROTOCOL_PARAMETERS_DEFAULT
+    def.costModels = []
+    def.costModels.PlutusV1 = obj.plutusCostModels["plutus:v1"]
+    def.costModels.PlutusV2 = [] 
+    for (let i = 0; i <= 174; i++) {
+      def.costModels.PlutusV2[i] = obj.plutusCostModels["plutus:v2"][i]
+    }
+    def.costModels.PlutusV3 = obj.plutusCostModels["plutus:v3"]
+    return def
   }
 
   async waitBlock() {

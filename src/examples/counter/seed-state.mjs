@@ -7,7 +7,6 @@ import {
   mintingPolicyToId,
   fromText,
   applyParamsToScript,
-  applyDoubleCborEncoding,
   validatorToAddress
 } from '@lucid-evolution/lucid'
 import { LucidProviderFrontend } from '../../lucid-frontend.mjs'
@@ -37,15 +36,16 @@ const main = async () => {
 
   // Get the script address
   const counterScript = JSON.parse(fs.readFileSync("aiken/plutus.json"))
-  const spendValidator = counterScript.validators.find(v => {
+  const incrementValidator = counterScript.validators.find(v => {
     return v.title === "counter.increment.spend"
   })
+  const appliedScript = applyParamsToScript(
+    incrementValidator.compiledCode,
+    [ policyId, fromText("counter-token") ]
+  )
   const validator = {
-    type: "PlutusV2",
-    script: applyParamsToScript(
-      spendValidator.compiledCode,
-      [ policyId, fromText("counter-token") ]
-    )
+    type: counterScript.preamble.plutusVersion === "v3" ? "PlutusV3" : "PlutusV2",
+    script: appliedScript
   }
   const scriptAddr = validatorToAddress("Custom", validator)
   console.log("Script address=" + scriptAddr)
@@ -58,11 +58,12 @@ const main = async () => {
 
     // Create a utxo with counter = 0 and the state NFT token attached
     const tx = await lucid.newTx()
-      .pay.ToContract(scriptAddr, { inline: datum }, { [unit]: 1n })
+      .pay.ToContract(scriptAddr, { kind: "inline", value: datum }, { [unit]: 1n })
       .complete()
 
-    const signedTx = await tx.sign().complete()
+    const signedTx = await tx.sign.withWallet().complete()
     const txHash = await signedTx.submit()
+    console.log("Transaction sent: " + txHash)
 
   } catch (err) {
     console.log("Caught error: " + err)

@@ -1,6 +1,14 @@
 import fs from 'fs'
 
-import { Data, Lucid, fromText, applyParamsToScript } from 'lucid-cardano'
+import { 
+  Lucid, 
+  Data,
+  scriptFromNative,
+  mintingPolicyToId,
+  fromText, 
+  applyParamsToScript,
+  validatorToAddress
+} from '@lucid-evolution/lucid'
 import { LucidProviderFrontend } from '../../lucid-frontend.mjs'
 import { loadPrivateKey } from '../../key-utils.mjs'
 
@@ -17,33 +25,35 @@ const main = async () => {
 
   const provider = new LucidProviderFrontend("ws://localhost:1338")
   await provider.init()
-  const lucid = await Lucid.new(provider, "Custom")
+  const lucid = await Lucid(provider, "Custom")
 
   const wallet_name = process.argv[2]
   console.log("Using wallet: " + wallet_name)
-  lucid.selectWalletFromPrivateKey(loadPrivateKey(wallet_name))
+  lucid.selectWallet.fromPrivateKey(loadPrivateKey(wallet_name))
 
   // Get the state token policyId + name
   const script = JSON.parse(fs.readFileSync("state-token.script"))
-  const mintingPolicy = lucid.utils.nativeScriptFromJson(script)
-  const policyId = lucid.utils.mintingPolicyToId(mintingPolicy)
+  const mintingPolicy = scriptFromNative(script)
+  const policyId = mintingPolicyToId(mintingPolicy)
   const unit = policyId + fromText("counter-token")
   console.log("Policy ID = " + policyId)
 
   // Load the script and compute the script address from it
   const counterScript = JSON.parse(fs.readFileSync("aiken/plutus.json"))
-  const spendValidator = counterScript.validators.find(v => {
+  const incrementValidator = counterScript.validators.find(v => {
     return v.title === "counter.increment.spend"
   })
-  const incrementValidator = applyParamsToScript(spendValidator.compiledCode,
+  const appliedScript = applyParamsToScript(
+    incrementValidator.compiledCode,
     [ policyId, fromText("counter-token") ]
   )
   const validator = {
-    type: "PlutusV2",
-    script: incrementValidator
+    type: counterScript.preamble.plutusVersion === "v3" ? "PlutusV3" : "PlutusV2",
+    script: appliedScript
   }
-  const scriptAddr = lucid.utils.validatorToAddress(validator)
+  const scriptAddr = validatorToAddress("Custom", validator)
   console.log("Script address = " + scriptAddr)
+  console.log(JSON.stringify(validator))
 
   // Query the latest utxo with the NFT token. Our custom provider backend
   // includes utxos created by mempool transactions and removes utxos
@@ -54,9 +64,9 @@ const main = async () => {
     throw Error("No state utxos found")
   }
   // Sanity check that we only have one state utxo
-  //if (scriptUtxos.length > 1) {
-    //throw Error("Multiple state utxos encountered")
-  //}
+  if (scriptUtxos.length > 1) {
+    throw Error("Multiple state utxos encountered")
+  }
   // Pull the datum from the state utxo. This is the current "state" of the
   // script.
   const stateUtxo = scriptUtxos[0]
@@ -72,22 +82,26 @@ const main = async () => {
   state.counter++
   console.log("Next state is " + state.counter)
 
-  console.log("wallet = " + await lucid.wallet.address())
+  console.log("wallet = " + await lucid.wallet().address())
+
+  const datum = Data.to(state, CounterSchema)
+  console.log("Datum=" + datum)
 
   try {
 
     const tx = await lucid.newTx()
       .collectFrom([stateUtxo], Data.void())
-      .attachSpendingValidator(validator)
-      .payToContract(scriptAddr, { inline: Data.to(state, CounterSchema) }, { [unit]: 1n })
+      .attach.SpendingValidator(validator)
+      .pay.ToContract(scriptAddr, { kind: "inline", value: datum }, { [unit]: 1n })
       .complete()
 
-    const signedTx = await tx5.sign().complete()
+    const signedTx = await tx.sign.withWallet().complete()
     const txHash = await signedTx.submit()
-    console.log("txHash = " + txHash)
+    console.log("Transaction sent: " + txHash)
 
   } catch (err) {
     console.log("Caught error: " + err)
+    //console.log(err.stack)
   }
 
   process.exit()

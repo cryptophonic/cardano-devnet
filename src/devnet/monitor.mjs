@@ -289,6 +289,7 @@ class OgmiosConnection {
     })
 
     this.ogmiosServer.on('message', msg => {
+//fs.appendFileSync(process.env.DEVNET_ROOT + "/ogmios.log", "ogmios receive: " + msg + "\n")
       const response = JSON.parse(msg)
       if (this.stateMachine[response.method] !== undefined) {
         // Send to the state machine
@@ -303,7 +304,9 @@ class OgmiosConnection {
   send(jsonRpcObj) {
     jsonRpcObj.jsonrpc = "2.0"
     jsonRpcObj.id = this.nextId++
-    this.ogmiosServer.send(JSON.stringify(jsonRpcObj))
+    const request = JSON.stringify(jsonRpcObj)
+//fs.appendFileSync(process.env.DEVNET_ROOT + "/ogmios.log", "ogmios send: " + request + "\n")
+    this.ogmiosServer.send(request)
     return jsonRpcObj.id
   }
 
@@ -656,6 +659,10 @@ class LucidProviderBackend {
       }
       return obj
     })
+  }
+
+  async queryProtocolParameters() {
+    return await this.ogmios.queryProtocolParameters()
   }
 
   async submitTx(tx) {
