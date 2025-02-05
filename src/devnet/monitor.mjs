@@ -533,7 +533,7 @@ class OgmiosSynchronousRequestHandler {
       this.pending[id] = resolve
     })
     if (obj.error !== undefined) {
-      throw Error(obj.error.message)
+      throw Error(JSON.stringify(obj.error))
     }
     return obj.result
   }

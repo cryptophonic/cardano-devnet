@@ -40,7 +40,11 @@ export class LucidProviderFrontend {
         const obj = JSON.parse(msg.data)
         if (this.queue[obj.id] !== undefined) {
           if (obj.error !== undefined) {
-            console.error("Error: " + obj.error)
+            const err = JSON.parse(obj.error)
+            console.error("Error: " + err.message)
+            if (err.data !== undefined) {
+              console.error(JSON.stringify(err.data, null, 2))
+            }
             await this.queue[obj.id](obj.error)
           } else {
             await this.queue[obj.id](obj.result)
