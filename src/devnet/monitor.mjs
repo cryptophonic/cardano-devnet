@@ -289,7 +289,7 @@ class OgmiosConnection {
     })
 
     this.ogmiosServer.on('message', msg => {
-//fs.appendFileSync(process.env.DEVNET_ROOT + "/ogmios.log", "ogmios receive: " + msg + "\n")
+fs.appendFileSync(process.env.DEVNET_ROOT + "/ogmios.log", "ogmios receive: " + msg + "\n")
       const response = JSON.parse(msg)
       if (this.stateMachine[response.method] !== undefined) {
         // Send to the state machine
@@ -305,7 +305,7 @@ class OgmiosConnection {
     jsonRpcObj.jsonrpc = "2.0"
     jsonRpcObj.id = this.nextId++
     const request = JSON.stringify(jsonRpcObj)
-//fs.appendFileSync(process.env.DEVNET_ROOT + "/ogmios.log", "ogmios send: " + request + "\n")
+fs.appendFileSync(process.env.DEVNET_ROOT + "/ogmios.log", "ogmios send: " + request + "\n")
     this.ogmiosServer.send(request)
     return jsonRpcObj.id
   }
@@ -520,6 +520,25 @@ class OgmiosSynchronousRequestHandler {
     return obj.result
   }
 
+  async evaluateTx(tx) {
+    const obj = await new Promise(resolve => {
+      const id = this.ogmios.send({
+        method: "evaluateTransaction",
+        params: {
+          transaction: {
+            cbor: tx
+          },
+          additionalUtxo: []
+        }
+      })
+      this.pending[id] = resolve
+    })
+    if (obj.error !== undefined) {
+      throw Error(JSON.stringify(obj.error))
+    }
+    return obj.result
+  }
+
   async submitTx(tx) {
     const obj = await new Promise(resolve => {
       const id = this.ogmios.send({
@@ -663,6 +682,12 @@ class LucidProviderBackend {
 
   async queryProtocolParameters() {
     return await this.ogmios.queryProtocolParameters()
+  }
+
+  async evaluateTx(tx) {
+    const res = await this.ogmios.evaluateTx(tx.cbor)
+    log.info("Evaluating transaction: " + tx.cbor.length + " bytes")
+    return res.transaction.id
   }
 
   async submitTx(tx) {

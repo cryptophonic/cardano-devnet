@@ -143,13 +143,27 @@ export class LucidProviderFrontend {
     return obj
   }
 
+  async evaluateTx(tx) {
+    console.log("LucidFrontend::evaluateTx")
+    const obj = {
+      method: "evaluateTx",
+      params: {
+        cbor: tx
+      }
+    }
+    console.log(JSON.stringify(obj, null, 2))
+    return await this.query(obj)
+  }
+
   async submitTx(tx) {
-    return await this.query({
+    const obj = {
       method: "submitTx",
       params: {
         cbor: tx
       }
-    })
+    }
+    console.log(JSON.stringify(obj, null, 2))
+    return await this.query(obj)
   }
 
 } 

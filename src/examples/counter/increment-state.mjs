@@ -89,13 +89,16 @@ const main = async () => {
 
   try {
 
+    console.log("here 1")
     const tx = await lucid.newTx()
-      .collectFrom([stateUtxo], Data.void())
+      .collectFrom([stateUtxo], Data.to(100n))
       .attach.SpendingValidator(validator)
       .pay.ToContract(scriptAddr, { kind: "inline", value: datum }, { [unit]: 1n })
-      .complete()
+      .complete({ localUPLCEval: false })
 
+    console.log("here 2")
     const signedTx = await tx.sign.withWallet().complete()
+    console.log("here 3")
     const txHash = await signedTx.submit()
     console.log("Transaction sent: " + txHash)
 
