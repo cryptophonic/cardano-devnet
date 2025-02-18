@@ -200,10 +200,6 @@ class ChainEventHandler {
     this.state_machine.on('transaction', this.newTransaction.bind(this))
   }
 
-  async waitBlock(cb) {
-    console.log("unimplemented")
-  }
-
   checkAlias(addr) {
     if (nameLookup[addr] === undefined) {
       // Check for an alias for this address

@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 
-while getopts "mie" opt; do
+while getopts "miep" opt; do
     case $opt in
         m)
             START_MONITOR=true
@@ -11,22 +11,24 @@ while getopts "mie" opt; do
         e)
             START_EXPLORER=true
             ;;
+        p)
+            START_PROVIDER=true
+            ;;
         \?)
-            echo "Invalid option -$OPTARG"
-            print_help
-            exit 1
+            OPTSERR=true
             ;;
     esac
 done
 
 shift $((OPTIND-1))
 
-if [[ ! $1 == ?(-)+([0-9]) ]]; then
+if [ -n "$OPTSERR" ] || [[ ! $1 == ?(-)+([0-9]) ]]; then
   SCRIPTNAME=$(basename $0)
-  echo "usage: $SCRIPTNAME [-m] [-i] [-e] <block time>"
+  echo "usage: $SCRIPTNAME [-m] [-i] [-e] [-p] <block time>"
   echo "  -m  run terminal monitor"
   echo "  -i  run indexer"
   echo "  -e  run explorer"
+  echo "  -p  run provider backend"
   exit -1
 fi
 
@@ -100,13 +102,16 @@ $CARDANO_CLI conway transaction build \
 if [ -n "$START_INDEXER" ]; then
   echo "Starting indexer"
   node $DEVNET_ROOT/src/devnet/indexer.mjs > $STDOUT_INDEXER 2>&1 &
-  INDEXER_PID=$!
 fi
 
 if [ -n "$START_EXPLORER" ]; then
   echo "Starting explorer"
   (cd $DEVNET_ROOT/explorer && npm run dev > /dev/null 2>&1) &
-  EXPLORER_PGID=$(ps --no-headers -o pgid:1 $$)
+fi
+
+if [ -n "$START_PROVIDER" ]; then
+  echo "Starting provider"
+  node $DEVNET_ROOT/src/devnet/provider.mjs > /dev/null 2>&1 &
 fi
 
 function clean_up {
@@ -115,16 +120,8 @@ function clean_up {
 
   docker compose down
 
-  if [ -n "$START_INDEXER" ]; then
-    echo "Killing indexer pid: $INDEXER_PID"
-    kill $INDEXER_PID
-  fi
-  if [ -n "$START_EXPLORER" ]; then
-    echo "Killing explorer process group id: $EXPLORER_PGID"
-    kill -term "-$EXPLORER_PGID"
-  fi
-
-  kill -term $$
+  THIS_PGID=$(ps --no-headers -o pgid:1 $$)
+  kill -term "-$THIS_PGID"
 }
 
 trap clean_up EXIT
