@@ -1,6 +1,6 @@
 import fs from 'fs'
 import path from 'path'
-import { OgmiosConnection, OgmiosStateMachine } from './components/Ogmios.mjs'
+import { OgmiosStateMachine } from './components/Ogmios.mjs'
 
 const DB_ROOT=process.env.DEVNET_ROOT + "/runtime/index"
 const OGMIOS_PORT = 1337
@@ -348,8 +348,6 @@ class DBWriter {
 }
 
 const writer = new DBWriter(DB_ROOT, new DBTransformer())
-const osm = new OgmiosStateMachine(writer)
-new OgmiosConnection(OGMIOS_PORT, osm)
-
-osm.addCallback(writer.writeBlock.bind(writer))
+const osm = new OgmiosStateMachine(OGMIOS_PORT)
+osm.on('block', writer.writeBlock.bind(writer))
 
