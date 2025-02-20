@@ -4,6 +4,8 @@
   "main": "index.js",
   "license": "MIT",
   "dependencies": {
+    "@blaze-cardano/query": "^0.3.5",
+    "@blaze-cardano/sdk": "^0.2.22",
     "bech32-buffer": "^0.2.1",
     "blake2": "^4.1.1",
     "blessed": "^0.1.81",

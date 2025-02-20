@@ -97,16 +97,16 @@ class OgmiosStateMachine extends EventEmitter {
 
 class OgmiosSynchronousRequestHandler {
 
-  constructor() {
+  constructor(port) {
     this.ogmiosServer = new WebSocket("ws://localhost:" + port)
     this.nextId = 0
     this.pending = {}
 
     this.ogmiosServer.on('message', msg => {
-      const response = JSON.parse(msg)
-      if (this[response.method] !== undefined) {
-        // Send to the response method
-        this[response.method](response)
+      const obj = JSON.parse(msg)
+      if (this.pending[obj.id] !== undefined) {
+        this.pending[obj.id](obj)
+        delete this.pending[obj.id]
       }
     })
   }
@@ -155,16 +155,6 @@ class OgmiosSynchronousRequestHandler {
     const obj = await new Promise(resolve => {
       const id = this.send({
         method: "queryLedgerState/protocolParameters"
-      })
-      this.pending[id] = resolve
-    })
-    return obj.result
-  }
-
-  async queryProposedProtocolParameters() {
-    const obj = await new Promise(resolve => {
-      const id = this.send({
-        method: "queryLedgerState/proposedProtocolParameters"
       })
       this.pending[id] = resolve
     })
