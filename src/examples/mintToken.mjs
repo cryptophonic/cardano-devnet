@@ -9,6 +9,7 @@ import {
   Ed25519KeyHashHex,
   ScriptAll,
   NativeScript,
+  Script,
   toHex,
   NetworkId
 } from '@blaze-cardano/core'
@@ -50,8 +51,10 @@ const main = async () => {
   pubKeyScript.setKeyHash(Ed25519KeyHashHex(keyHash))
   const allScript = new ScriptAll()
   allScript.setNativeScripts([pubKeyScript])
+
   const nativeScript = NativeScript.newScriptAll(allScript)
   const policyId = nativeScript.hash()
+
   const tokenName = toHex(Buffer.from("minted-token-name", "utf8"))
   const assetId = AssetId.fromParts(policyId, tokenName)
   console.log("Asset ID = " + assetId)
@@ -68,12 +71,14 @@ const main = async () => {
   const tx = await blaze
     .newTransaction()
     .addMint(policyId, amountsToMint)
-    .provideScript(nativeScript)
+    .provideScript(Script.newNativeScript(nativeScript))
     .complete()
 
   const signedTx = await blaze.signTransaction(tx)
-  const txId = await blaze.provider.postTransactionToChain(signedTx)
-  console.log("transaction sent: " + txId)
+  const txId = await blaze.provider.postTransactionToChain(signedTx.toCbor())
+  console.log("Transaction sent: " + txId)
+
+  process.exit()
 }
 
 main()

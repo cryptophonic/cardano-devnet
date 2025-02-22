@@ -105,6 +105,11 @@ class ProviderBackend {
     return unspent
   }
 
+  async submitTx(params) {
+    const res = await this.osrh.submitTx(params.cbor)
+    return res.transaction.id
+  }
+
 }
 
 new ProviderBackend(PROVIDER_PORT)

@@ -104,13 +104,11 @@ export class BlazeProviderFrontend extends Provider {
   }
 
   async getParameters() {
-    console.log("DevnetProvider::getParameters")
     const obj = await this.query({
       method: "queryProtocolParameters"
     })
     const costModels = new Map()
     Object.keys(obj.plutusCostModels).map(cm => {
-      console.log("setting: " + cm)
       let key = PlutusLanguageVersion.V1
       if (cm === "plutus:v1") key = PlutusLanguageVersion.V1
       if (cm === "plutus:v2") key = PlutusLanguageVersion.V2
@@ -183,6 +181,17 @@ export class BlazeProviderFrontend extends Provider {
       return this.buildTransactionUnspentOutput(utxo)
     })
     return utxos
+  }
+
+  async postTransactionToChain(cbor) {
+    const query = {
+      method: "submitTx",
+      params: {
+        cbor: cbor
+      }
+    }
+    const txid = await this.query(query)
+    return TransactionId(txid)
   }
 
 }
