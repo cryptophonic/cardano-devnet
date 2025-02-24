@@ -1,5 +1,3 @@
-import { randomBytes } from 'crypto'
-
 import {
   Blaze
 } from '@blaze-cardano/sdk'
@@ -10,13 +8,11 @@ import {
   ScriptAll,
   NativeScript,
   Script,
-  toHex,
-  NetworkId
+  toHex
 } from '@blaze-cardano/core'
-import {
-  HotSingleWallet
-} from '@blaze-cardano/wallet'
+
 import { BlazeProviderFrontend } from '../blaze-frontend.mjs'
+import { randomWallet } from '../blaze-wallet.mjs'
 
 const keypress = async () => {
   process.stdin.setRawMode(true)
@@ -31,8 +27,7 @@ const main = async () => {
   await provider.init()
 
   // Create a random wallet, get the address and key hash
-  const privKey = randomBytes(32).toString("hex")
-  const wallet = new HotSingleWallet(privKey, NetworkId.Testnet, provider)
+  const wallet = randomWallet(provider)
   const keyHash = wallet.address.toBytes().slice(2)
   console.log("key hash = " + keyHash)
 
