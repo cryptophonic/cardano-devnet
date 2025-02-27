@@ -60,8 +60,10 @@ const main = async () => {
   console.log("Please deposit funds to: " + wallet.address.toBech32())
   console.log("<Press any key to continue>")
   await keypress()
+  console.log()
 
   // Build minting transaction
+  console.log("Minting token...")
   const blaze = await Blaze.from(provider, wallet)
   const tx = await blaze
     .newTransaction()

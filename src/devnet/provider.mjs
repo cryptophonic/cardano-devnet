@@ -61,6 +61,27 @@ class ProviderBackend {
     }
   }
 
+  async waitTransaction(params) {
+    const res = await new Promise(resolve => {
+      const blockListener = block => {
+        console.log("received block: " + block.id)
+        block.transactions.map(tx => {
+          if (tx.id === params.id) {
+            console.log("matched transaction: " + params.id)
+            this.osm.off('block', blockListener)
+            resolve(block)
+          }
+        })
+      }
+      this.osm.on('block', blockListener)
+    })
+    return {
+      tx: params.id,
+      block: res.id,
+      height: res.height
+    }
+  }
+
   async queryProtocolParameters() {
     return await this.osrh.queryProtocolParameters()
   }

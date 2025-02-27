@@ -1,3 +1,4 @@
+/*
 import fs from 'fs'
 
 import { Data, Lucid, fromText, applyParamsToScript } from 'lucid-cardano'
@@ -56,6 +57,93 @@ const main = async () => {
   }
 
   process.exit()
+}
+
+main()
+*/
+
+import {
+  Blaze
+} from '@blaze-cardano/sdk'
+import {
+  TransactionOutput,
+  Value,
+  AssetId,
+  ScriptPubkey,
+  Ed25519KeyHashHex,
+  ScriptAll,
+  NativeScript,
+  Script,
+  toHex
+} from '@blaze-cardano/core'
+import { applyParamsToScript } from '@blaze-cardano/uplc'
+
+import { BlazeProviderFrontend } from '../../blaze-frontend.mjs'
+import { randomWallet, aliasWallet } from '../../blaze-wallet.mjs'
+
+const main = async () => {
+  const provider = new BlazeProviderFrontend("ws://localhost:1338")
+  await provider.init()
+
+  // Grab a random wallet
+  const mintWallet = randomWallet(provider)
+  console.log("Created mint wallet = " + mintWallet.address.toBech32())
+
+  // Fund the wallet from the devnet faucet
+  const faucet = aliasWallet("faucet", provider)
+  const amount = 10_000_000n
+  const faucetHandler = await Blaze.from(provider, faucet)
+  const fundingTx = await faucetHandler
+    .newTransaction()
+    .addOutput(new TransactionOutput(mintWallet.address, new Value(amount)))
+    .complete()
+  const signedFundingTx = await faucetHandler.signTransaction(fundingTx)
+  const fundingTxId = await faucetHandler.provider.postTransactionToChain(signedFundingTx.toCbor())
+  console.log("Funding tx hash = " + fundingTxId)
+  await provider.awaitTransactionConfirmation(fundingTxId)
+
+  /* Create native minting script
+  {
+    "type": "all",
+    "scripts": [
+      { 
+        "type": "sig", 
+        "keyHash": <mint wallet pubkey hash>
+      }
+    ]
+  }
+  */
+  const pubKeyScript = new ScriptPubkey()
+  pubKeyScript.setKeyHash(
+    Ed25519KeyHashHex(mintWallet.address.toBytes().slice(2))
+  )
+  const allScript = new ScriptAll()
+  allScript.setNativeScripts([pubKeyScript])
+
+  const nativeScript = NativeScript.newScriptAll(allScript)
+
+  // Determine the asset id
+  const policyId = nativeScript.hash()
+  const tokenName = toHex(Buffer.from("counter-token", "utf8"))
+  const assetId = AssetId.fromParts(policyId, tokenName)
+
+  // Mint one token
+  const amountsToMint = new Map()
+  amountsToMint.set(tokenName, BigInt(1))
+
+  // Submit minting transaction
+  const mintWalletHandler = await Blaze.from(provider, mintWallet)
+  const mintingTx = await mintWalletHandler
+    .newTransaction()
+    .addMint(policyId, amountsToMint)
+    .provideScript(Script.newNativeScript(nativeScript))
+    .complete()
+  const signedMintingTx = await mintWalletHandler.signTransaction(mintingTx)
+  const mintingTxId = await mintWalletHandler.provider.postTransactionToChain(signedMintingTx.toCbor())
+  console.log("minting transaction = " + mintingTxId)
+  await provider.awaitTransactionConfirmation(mintingTxId)
+
+const script = PlutusV2Script.fromCbor(cbor)
 }
 
 main()

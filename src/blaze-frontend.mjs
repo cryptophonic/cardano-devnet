@@ -103,6 +103,16 @@ export class BlazeProviderFrontend extends Provider {
     })
   }
 
+  async awaitTransactionConfirmation(txId, timeout) {
+    return await this.query({
+      method: "waitTransaction",
+      params: {
+        id: txId,
+        timeout: timeout
+      }
+    })
+  }
+
   async getParameters() {
     const obj = await this.query({
       method: "queryProtocolParameters"
