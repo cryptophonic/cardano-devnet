@@ -62,8 +62,11 @@ const main = async () => {
 main()
 */
 
+import fs from 'fs'
+
 import {
-  Blaze
+  Blaze,
+  applyParams
 } from '@blaze-cardano/sdk'
 import {
   TransactionOutput,
@@ -74,7 +77,11 @@ import {
   ScriptAll,
   NativeScript,
   Script,
-  toHex
+  toHex,
+  HexBlob,
+  PlutusData,
+  PlutusV2Script,
+  Address
 } from '@blaze-cardano/core'
 import { applyParamsToScript } from '@blaze-cardano/uplc'
 
@@ -124,8 +131,10 @@ const main = async () => {
 
   // Determine the asset id
   const policyId = nativeScript.hash()
-  const tokenName = toHex(Buffer.from("counter-token", "utf8"))
-  const assetId = AssetId.fromParts(policyId, tokenName)
+  console.log("policy ID = " + policyId)
+  const tokenNameBytes = Buffer.from("counter-token", "utf8")
+  const tokenName = toHex(tokenNameBytes)
+  //const assetId = AssetId.fromParts(policyId, tokenName)
 
   // Mint one token
   const amountsToMint = new Map()
@@ -143,7 +152,23 @@ const main = async () => {
   console.log("minting transaction = " + mintingTxId)
   await provider.awaitTransactionConfirmation(mintingTxId)
 
-const script = PlutusV2Script.fromCbor(cbor)
+  // Load the counter script and apply the policy ID and name as parameters
+  const aikenPlutus = JSON.parse(fs.readFileSync("./aiken/plutus.json"))
+  const cbor = aikenPlutus.validators.reduce((acc, v) => {
+    if (v.title === "counter.increment.spend") {
+      acc = v.compiledCode
+    }
+    return acc
+  }, undefined)
+
+  const appliedCbor = applyParams(HexBlob(cbor), 
+    PlutusData.newBytes(Buffer.from(policyId, "hex")),
+    PlutusData.newBytes(tokenNameBytes)
+  )
+
+  const script = new PlutusV2Script(appliedCbor)
+  const hash = script.hash()
+  console.log(Address.fromBytes(hash).toBech32())
 }
 
 main()
