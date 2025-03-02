@@ -71,7 +71,7 @@ import {
 import {
   TransactionOutput,
   Value,
-  AssetId,
+  NetworkId,
   ScriptPubkey,
   Ed25519KeyHashHex,
   ScriptAll,
@@ -81,9 +81,11 @@ import {
   HexBlob,
   PlutusData,
   PlutusV2Script,
-  Address
+  CredentialType
 } from '@blaze-cardano/core'
-import { applyParamsToScript } from '@blaze-cardano/uplc'
+import {
+  Cardano
+} from '@cardano-sdk/core'
 
 import { BlazeProviderFrontend } from '../../blaze-frontend.mjs'
 import { randomWallet, aliasWallet } from '../../blaze-wallet.mjs'
@@ -167,8 +169,13 @@ const main = async () => {
   )
 
   const script = new PlutusV2Script(appliedCbor)
-  const hash = script.hash()
-  console.log(Address.fromBytes(hash).toBech32())
+  const scriptHash = script.hash()
+  const scriptAddress = Cardano.EnterpriseAddress.fromCredentials(NetworkId.Testnet, {
+    hash: scriptHash,
+    type: CredentialType.ScriptHash
+  }).toAddress()
+    .toBech32()
+  console.log("Script address = " + scriptAddress)
 }
 
 main()
