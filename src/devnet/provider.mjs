@@ -64,10 +64,10 @@ class ProviderBackend {
   async waitTransaction(params) {
     const res = await new Promise(resolve => {
       const blockListener = block => {
-        console.log("received block: " + block.id)
+        //console.log("received block: " + block.id)
         block.transactions.map(tx => {
           if (tx.id === params.id) {
-            console.log("matched transaction: " + params.id)
+            //console.log("matched transaction: " + params.id)
             this.osm.off('block', blockListener)
             resolve(block)
           }
@@ -96,21 +96,10 @@ class ProviderBackend {
         const [ hash, index ] = ref.split("#")
         const outputPath = this.indexPath + "/transactions/" + hash + "/outputs/" + index + "/output"
         const outputData = JSON.parse(fs.readFileSync(outputPath))
-        const assetList = Object.keys(outputData.value).reduce((acc, policy) => {
-          if (policy === "ada") {
-            acc["lovelace"] = outputData.value[policy]["lovelace"]
-          } else {
-            acc[outputData.value[policy]].map(name => {
-              const unit = policy + "." + name
-              acc[unit] = outputData.value[policy[name]]
-            })
-          }
-          return acc
-        }, {})
         return {
           txHash: hash,
           outputIndex: index,
-          assets: assetList,
+          assets: outputData.value,
           address: outputData.address
         }
       })

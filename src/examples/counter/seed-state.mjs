@@ -1,67 +1,3 @@
-/*
-import fs from 'fs'
-
-import { Data, Lucid, fromText, applyParamsToScript } from 'lucid-cardano'
-import { LucidProviderFrontend } from '../../lucid-frontend.mjs'
-import { loadPrivateKey } from '../../key-utils.mjs'
-
-// This schema must match the state type for the validator script
-// See aiken/validators/counter.ak for the state type
-const CounterSchema = Data.Object({
-  counter: Data.Integer()
-})
-
-// Initial state object with counter set to 0
-const zeroState = { counter: 0n }
-
-const main = async () => {
-  const provider = new LucidProviderFrontend("ws://localhost:1338")
-  await provider.init()
-  const lucid = await Lucid.new(provider, "Custom")
-
-  lucid.selectWalletFromPrivateKey(loadPrivateKey("owner"))
-
-  // Get the state token policyId
-  const script = JSON.parse(fs.readFileSync("state-token.script"))
-  const mintingPolicy = lucid.utils.nativeScriptFromJson(script)
-  const policyId = lucid.utils.mintingPolicyToId(mintingPolicy)
-  const unit = policyId + fromText("counter-token")
-
-  // Get the script address
-  const counterScript = JSON.parse(fs.readFileSync("aiken/plutus.json"))
-  const validator = {
-    type: "PlutusV2",
-    script: applyParamsToScript(counterScript.validators[0].compiledCode, [
-      policyId, fromText("counter-token")
-    ])
-  }
-  const scriptAddr = lucid.utils.validatorToAddress(validator)
-  console.log("Script address=" + scriptAddr)
-
-  // Serialize the counter = 0 state to CBOR
-  const datum = Data.to(zeroState, CounterSchema)
-  console.log("Datum=" + datum)
-
-  try {
-
-    // Create a utxo with counter = 0 and the state NFT token attached
-    const tx = await lucid.newTx()
-      .payToContract(scriptAddr, { inline: datum }, { [unit]: 1n })
-      .complete()
-
-    const signedTx = await tx.sign().complete()
-    const txHash = await signedTx.submit()
-
-  } catch (err) {
-    console.log("Caught error: " + err)
-  }
-
-  process.exit()
-}
-
-main()
-*/
-
 import fs from 'fs'
 
 import {
@@ -69,8 +5,10 @@ import {
   applyParams
 } from '@blaze-cardano/sdk'
 import {
+  Address,
   TransactionOutput,
   Value,
+  AssetId,
   NetworkId,
   ScriptPubkey,
   Ed25519KeyHashHex,
@@ -79,9 +17,12 @@ import {
   Script,
   toHex,
   HexBlob,
-  PlutusData,
   PlutusV2Script,
-  CredentialType
+  CredentialType,
+  PlutusData,
+  ConstrPlutusData,
+  PlutusList,
+  Datum
 } from '@blaze-cardano/core'
 import {
   Cardano
@@ -108,7 +49,7 @@ const main = async () => {
     .complete()
   const signedFundingTx = await faucetHandler.signTransaction(fundingTx)
   const fundingTxId = await faucetHandler.provider.postTransactionToChain(signedFundingTx.toCbor())
-  console.log("Funding tx hash = " + fundingTxId)
+  console.log("Funding tx = " + fundingTxId)
   await provider.awaitTransactionConfirmation(fundingTxId)
 
   /* Create native minting script
@@ -122,6 +63,7 @@ const main = async () => {
     ]
   }
   */
+  
   const pubKeyScript = new ScriptPubkey()
   pubKeyScript.setKeyHash(
     Ed25519KeyHashHex(mintWallet.address.toBytes().slice(2))
@@ -133,10 +75,32 @@ const main = async () => {
 
   // Determine the asset id
   const policyId = nativeScript.hash()
-  console.log("policy ID = " + policyId)
+  console.log("Policy ID = " + policyId)
   const tokenNameBytes = Buffer.from("counter-token", "utf8")
   const tokenName = toHex(tokenNameBytes)
-  //const assetId = AssetId.fromParts(policyId, tokenName)
+  console.log("Token Name = " + tokenName)
+
+  // Load the counter script and apply the policy ID and name as parameters
+  const aikenPlutus = JSON.parse(fs.readFileSync("./aiken/plutus.json"))
+  const rawCbor = aikenPlutus.validators.reduce((acc, v) => {
+    if (v.title === "counter.increment.spend") {
+      acc = v.compiledCode
+    }
+    return acc
+  }, undefined)
+  const appliedCbor = applyParams(HexBlob(rawCbor), 
+    PlutusData.newBytes(Buffer.from(policyId, "hex")),
+    PlutusData.newBytes(tokenNameBytes)
+  )
+
+  // Compute the script address for these params
+  const script = new PlutusV2Script(appliedCbor)
+  const scriptAddress = Cardano.EnterpriseAddress.fromCredentials(NetworkId.Testnet, {
+    hash: script.hash(),
+    type: CredentialType.ScriptHash
+  }).toAddress()
+    .toBech32()
+  console.log("Script address = " + scriptAddress)
 
   // Mint one token
   const amountsToMint = new Map()
@@ -151,31 +115,37 @@ const main = async () => {
     .complete()
   const signedMintingTx = await mintWalletHandler.signTransaction(mintingTx)
   const mintingTxId = await mintWalletHandler.provider.postTransactionToChain(signedMintingTx.toCbor())
-  console.log("minting transaction = " + mintingTxId)
+  console.log("Minting tx = " + mintingTxId)
   await provider.awaitTransactionConfirmation(mintingTxId)
 
-  // Load the counter script and apply the policy ID and name as parameters
-  const aikenPlutus = JSON.parse(fs.readFileSync("./aiken/plutus.json"))
-  const cbor = aikenPlutus.validators.reduce((acc, v) => {
-    if (v.title === "counter.increment.spend") {
-      acc = v.compiledCode
-    }
-    return acc
-  }, undefined)
+  // Write metadata
+  fs.writeFileSync("metadata.json", JSON.stringify({
+    script: appliedCbor,
+    scriptAddress: scriptAddress,
+    policyId: policyId,
+    tokenName: tokenName
+  }))
 
-  const appliedCbor = applyParams(HexBlob(cbor), 
-    PlutusData.newBytes(Buffer.from(policyId, "hex")),
-    PlutusData.newBytes(tokenNameBytes)
-  )
+  // Compute datum value = zero
+  const fieldList = new PlutusList()
+  fieldList.add(PlutusData.newInteger(0n))
+  const zeroCount = new ConstrPlutusData(0n, fieldList)
+  const datum = Datum.newInlineData(PlutusData.newConstrPlutusData(zeroCount))
 
-  const script = new PlutusV2Script(appliedCbor)
-  const scriptHash = script.hash()
-  const scriptAddress = Cardano.EnterpriseAddress.fromCredentials(NetworkId.Testnet, {
-    hash: scriptHash,
-    type: CredentialType.ScriptHash
-  }).toAddress()
-    .toBech32()
-  console.log("Script address = " + scriptAddress)
+  // Send minted state token to script with 
+  const tokenMap = new Map()
+  tokenMap.set(AssetId.fromParts(policyId, tokenName), 1n)
+  const value = new Value(0n, tokenMap)
+  const seedTx = await mintWalletHandler
+    .newTransaction()
+    .lockAssets(Address.fromBech32(scriptAddress), value, datum)
+    .complete()
+  const signedSeedTx = await mintWalletHandler.signTransaction(seedTx)
+  const seedTxId = await mintWalletHandler.provider.postTransactionToChain(signedSeedTx.toCbor())
+  console.log("Seed tx = " + seedTxId)
+  await provider.awaitTransactionConfirmation(seedTxId)
+  
+  process.exit()
 }
 
 main()

@@ -77,7 +77,8 @@ export class BlazeProviderFrontend extends Provider {
       if (k === "lovelace") {
         lovelace = BigInt(quantity)
       } else {
-        tokenMap.set(k, BigInt(quantity))
+        const parts = k.split(".")
+        tokenMap.set(AssetId(parts[0] + parts[1]), BigInt(quantity))
       }
     })
     const txOut = new TransactionOutput(
@@ -173,6 +174,18 @@ export class BlazeProviderFrontend extends Provider {
     }
     const obj = await this.query(query)
     const utxos = obj.map(utxo => {
+      const assetList = Object.keys(utxo.assets).reduce((acc, policy) => {
+        if (policy === "ada") {
+          acc["lovelace"] = utxo.assets[policy]["lovelace"]
+        } else {
+          Object.keys(utxo.assets[policy]).map(name => {
+            const unit = policy + "." + name
+            acc[unit] = utxo.assets[policy][name]
+          })
+        }
+        return acc
+      }, {})
+      utxo.assets = assetList
       return this.buildTransactionUnspentOutput(utxo)
     })
     return utxos
