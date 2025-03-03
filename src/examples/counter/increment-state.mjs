@@ -32,37 +32,38 @@ const main = async () => {
   await provider.init()
 
   const alias = process.argv[2]
-  const wallet = aliasWallet(alias)
+  const wallet = aliasWallet(alias, provider)
   console.log("Loaded " + alias + " wallet = " + wallet.address.toBech32())
 
   const policyId = PolicyId(metadata.policyId)
   const tokenName = AssetName(metadata.tokenName)
-  const utxos = await provider.getUnspentOutputsWithAsset(
+  const scriptUtxos = await provider.getUnspentOutputsWithAsset(
     Address.fromBech32(metadata.scriptAddress), 
     AssetId.fromParts(policyId, tokenName)
   )
-  if (utxos.length !== 1) {
+  if (scriptUtxos.length !== 1) {
     console.error("NFT count != 1")
     process.exit()
   }
-  const coreTxOut = utxos[0].toCore()[1]
+  const coreTxOut = scriptUtxos[0].toCore()[1]
   const curCount = coreTxOut.datum.fields.items[0]
 
-  // Compute datum value = zero
+  // Compute datum value = cur + 1
   const fieldList = new PlutusList()
   fieldList.add(PlutusData.newInteger(curCount + 1n))
-  const zeroCount = new ConstrPlutusData(0n, fieldList)
-  const datum = Datum.newInlineData(PlutusData.newConstrPlutusData(zeroCount))
+  const incCount = new ConstrPlutusData(0n, fieldList)
+  const datum = Datum.newInlineData(PlutusData.newConstrPlutusData(incCount))
+  console.log(datum.toCbor())
 
   // Send minted state token to script with 
   const tokenMap = new Map()
-  tokenMap.set(AssetId.fromParts(policyId, tokenName), 1n)
+  tokenMap.set(AssetId.fromParts(PolicyId(policyId), AssetName(tokenName)), 1n)
   const value = new Value(0n, tokenMap)
   const incrementWalletHandler = await Blaze.from(provider, wallet)
   const seedTx = await incrementWalletHandler
     .newTransaction()
-    .addOutput(utxos[0])
-    .lockAssets(Address.fromBech32(scriptAddress), value, datum)
+    .addOutput(scriptUtxos[0].output())
+    .lockAssets(Address.fromBech32(metadata.scriptAddress), value, datum)
     .complete()
   const signedSeedTx = await incrementWalletHandler.signTransaction(seedTx)
   const seedTxId = await incrementWalletHandler.provider.postTransactionToChain(signedSeedTx.toCbor())

@@ -159,6 +159,9 @@ class ProviderBackend {
         return acc
       }, [])
     }
+    if (this.debug) {
+      console.log(JSON.stringify(unspent, null, 2))
+    }
     return unspent
   }
 
