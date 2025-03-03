@@ -9,6 +9,8 @@ import {
   TransactionOutput,
   Value,
   AssetId,
+  PolicyId,
+  AssetName,
   NetworkId,
   ScriptPubkey,
   Ed25519KeyHashHex,
@@ -134,7 +136,7 @@ const main = async () => {
 
   // Send minted state token to script with 
   const tokenMap = new Map()
-  tokenMap.set(AssetId.fromParts(policyId, tokenName), 1n)
+  tokenMap.set(AssetId.fromParts(PolicyId(policyId), AssetName(tokenName)), 1n)
   const value = new Value(0n, tokenMap)
   const seedTx = await mintWalletHandler
     .newTransaction()

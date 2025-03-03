@@ -7,7 +7,10 @@ const PROVIDER_PORT = 1338
 
 class ProviderBackend {
 
-  constructor(port) {
+  constructor(port, debug) {
+    if (debug) {
+      this.debug = true
+    }
     this.server = new WebSocketServer({ port: port })
     this.osm = new OgmiosStateMachine(OGMIOS_PORT)
     this.osrh = new OgmiosSynchronousRequestHandler(OGMIOS_PORT)
@@ -87,6 +90,9 @@ class ProviderBackend {
   }
 
   async getUtxos(params) {
+    if (this.debug) {
+      console.log("ProviderBackend::getUtxos")
+    }
     const address = params.address
     const unspentPath = this.indexPath + "/addresses/" + address + "/unspent"
     let unspent = []
@@ -105,10 +111,16 @@ class ProviderBackend {
         }
       })
     }
+    if (this.debug) {
+      console.log(JSON.stringify(unspent, null, 2))
+    }
     return unspent
   }
 
   async getUtxosWithUnit(params) {
+    if (this.debug) {
+      console.log("ProviderBackend::getUtxosWithUnit")
+    }
     const address = params.address
     const unspentPath = this.indexPath + "/addresses/" + address + "/unspent"
     let unspent = []
@@ -136,10 +148,17 @@ class ProviderBackend {
   }
 
   async submitTx(params) {
+    if (this.debug) {
+      console.log("ProviderBackend::submitTx")
+    }
     const res = await this.osrh.submitTx(params.cbor)
     return res.transaction.id
   }
 
 }
 
-new ProviderBackend(PROVIDER_PORT)
+if (process.argv[2] === "--debug") {
+  new ProviderBackend(PROVIDER_PORT, true)
+} else {
+  new ProviderBackend(PROVIDER_PORT)
+}
