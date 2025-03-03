@@ -50,6 +50,19 @@ class ProviderBackend {
     }))
   }
 
+  async waitFileExists(filename) {
+    const delay = async () => {
+      await new Promise(resolve => {
+        setTimeout(() => {
+          resolve()
+        }, 100)
+      })
+    }
+    while (!fs.existsSync(filename)) [
+      await delay(500)
+    ]
+  }
+
   // Simply waits for the next block before it returns. Useful for synchronizing bash
   // scripts or other sequencing transactions
   async waitBlock() {    
@@ -58,6 +71,7 @@ class ProviderBackend {
         resolve(block)
       })
     })
+    await this.waitFileExists(this.indexPath + "/blocks/" + res.id + "/block")
     return {
       hash: res.id, 
       height: res.height
@@ -78,6 +92,7 @@ class ProviderBackend {
       }
       this.osm.on('block', blockListener)
     })
+    await this.waitFileExists(this.indexPath + "/transactions/" + params.id + "/tx")
     return {
       tx: params.id,
       block: res.id,

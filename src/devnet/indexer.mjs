@@ -189,7 +189,6 @@ class DBWriter {
     fs.mkdirSync(this.db + "/transactions/" + tx.id)
     fs.mkdirSync(this.db + "/transactions/" + tx.id + "/inputs")
     fs.mkdirSync(this.db + "/transactions/" + tx.id + "/outputs")
-    fs.writeFileSync(this.db + "/transactions/" + tx.id + "/tx", formattedTransaction)
     relative_link(this.db + "/blocks/" + block.id + "/block", this.db + "/transactions/" + tx.id + "/block")
     let redeemers = {}
     if (tx.redeemers !== undefined) {
@@ -280,6 +279,8 @@ class DBWriter {
     }
     fs.writeFileSync(this.db + "/pages/transactions/" + page, JSON.stringify(pageObj, null, 2))
     fs.writeFileSync(this.db + "/pages/transactions/last", JSON.stringify(page))
+    // Do this last because the provider waits for this file to eliminate race conditions
+    fs.writeFileSync(this.db + "/transactions/" + tx.id + "/tx", formattedTransaction)
   }
 
   produce(utxo) {
