@@ -13,7 +13,9 @@ import {
   PlutusData,
   ConstrPlutusData,
   PlutusList,
-  Datum
+  Datum,
+  PlutusV2Script,
+  HexBlob
 } from '@blaze-cardano/core'
 
 import { BlazeProviderFrontend } from '../../blaze-frontend.mjs'
@@ -54,6 +56,11 @@ const main = async () => {
   const incCount = new ConstrPlutusData(0n, fieldList)
   const datum = Datum.newInlineData(PlutusData.newConstrPlutusData(incCount))
   console.log(datum.toCbor())
+  console.log(scriptUtxos[0].output().toCbor())
+
+  // Create script object
+  const script = PlutusV2Script.fromCbor(HexBlob(metadata.script))
+  console.log("script hash = " + script.hash())
 
   // Send minted state token to script with 
   const tokenMap = new Map()
@@ -62,7 +69,8 @@ const main = async () => {
   const incrementWalletHandler = await Blaze.from(provider, wallet)
   const seedTx = await incrementWalletHandler
     .newTransaction()
-    .addOutput(scriptUtxos[0].output())
+    .addInput(scriptUtxos[0])
+    .provideScript(script)
     .lockAssets(Address.fromBech32(metadata.scriptAddress), value, datum)
     .complete()
   const signedSeedTx = await incrementWalletHandler.signTransaction(seedTx)
