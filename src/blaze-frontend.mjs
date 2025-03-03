@@ -196,11 +196,24 @@ export class BlazeProviderFrontend extends Provider {
       method: "getUtxosWithUnit",
       params: {
         address: address.toBech32(),
-        unit: unit.value
+        policyId: AssetId.getPolicyId(unit),
+        tokenName: AssetId.getAssetName(unit)
       }
     }
     const obj = await this.query(query)
     const utxos = obj.map(utxo => {
+      const assetList = Object.keys(utxo.assets).reduce((acc, policy) => {
+        if (policy === "ada") {
+          acc["lovelace"] = utxo.assets[policy]["lovelace"]
+        } else {
+          Object.keys(utxo.assets[policy]).map(name => {
+            const unit = policy + "." + name
+            acc[unit] = utxo.assets[policy][name]
+          })
+        }
+        return acc
+      }, {})
+      utxo.assets = assetList
       return this.buildTransactionUnspentOutput(utxo)
     })
     return utxos

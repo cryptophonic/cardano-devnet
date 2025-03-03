@@ -100,7 +100,8 @@ class ProviderBackend {
           txHash: hash,
           outputIndex: index,
           assets: outputData.value,
-          address: outputData.address
+          address: outputData.address,
+          datum: outputData.datum
         }
       })
     }
@@ -111,7 +112,26 @@ class ProviderBackend {
     const address = params.address
     const unspentPath = this.indexPath + "/addresses/" + address + "/unspent"
     let unspent = []
-    // TBD
+    if (fs.existsSync(unspentPath)) {
+      const unspentRefList = JSON.parse(fs.readFileSync(unspentPath))
+      unspent = unspentRefList.reduce((acc, ref) => {
+        const [ hash, index ] = ref.split("#")
+        const outputPath = this.indexPath + "/transactions/" + hash + "/outputs/" + index + "/output"
+        const outputData = JSON.parse(fs.readFileSync(outputPath))
+        if (outputData.value[params.policyId] !== undefined) {
+          if (outputData.value[params.policyId][params.tokenName] > 0) {
+            acc.push({
+              txHash: hash,
+              outputIndex: index,
+              assets: outputData.value,
+              address: outputData.address,
+              datum: outputData.datum
+            })
+          }
+        }
+        return acc
+      }, [])
+    }
     return unspent
   }
 

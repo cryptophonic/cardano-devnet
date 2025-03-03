@@ -1,13 +1,23 @@
 import fs from 'fs'
 
-import { Data, Lucid, fromText, applyParamsToScript } from 'lucid-cardano'
-import { LucidProviderFrontend } from '../../lucid-frontend.mjs'
-import { loadPrivateKey } from '../../key-utils.mjs'
+import {
+  Blaze
+} from '@blaze-cardano/sdk'
 
-// This schema must match the state type for the validator script
-const CounterSchema = Data.Object({
-  counter: Data.Integer()
-})
+import {
+  Address,
+  AssetId,
+  PolicyId,
+  AssetName,
+  Value,
+  PlutusData,
+  ConstrPlutusData,
+  PlutusList,
+  Datum
+} from '@blaze-cardano/core'
+
+import { BlazeProviderFrontend } from '../../blaze-frontend.mjs'
+import { aliasWallet } from '../../blaze-wallet.mjs'
 
 const main = async () => {
   if (process.argv.length !== 3) {
@@ -15,68 +25,49 @@ const main = async () => {
     process.exit()
   }
 
-  const provider = new LucidProviderFrontend("ws://localhost:1338")
+  const metadata = JSON.parse(fs.readFileSync("metadata.json"))
+  console.log("Using script address = " + metadata.scriptAddress)
+
+  const provider = new BlazeProviderFrontend("ws://localhost:1338")
   await provider.init()
-  const lucid = await Lucid.new(provider, "Custom")
 
-  const wallet_name = process.argv[2]
-  console.log("Using wallet: " + wallet_name)
-  lucid.selectWalletFromPrivateKey(loadPrivateKey(wallet_name))
+  const alias = process.argv[2]
+  const wallet = aliasWallet(alias)
+  console.log("Loaded " + alias + " wallet = " + wallet.address.toBech32())
 
-  // Get the state token policyId + name
-  const script = JSON.parse(fs.readFileSync("state-token.script"))
-  const mintingPolicy = lucid.utils.nativeScriptFromJson(script)
-  const policyId = lucid.utils.mintingPolicyToId(mintingPolicy)
-  const unit = policyId + fromText("counter-token")
-
-  // Load the script and compute the script address from it
-  const counterScript = JSON.parse(fs.readFileSync("aiken/plutus.json"))
-  const validator = {
-    type: "PlutusV2",
-    script: applyParamsToScript(counterScript.validators[0].compiledCode, [
-      policyId, fromText("counter-token")
-    ])
+  const policyId = PolicyId(metadata.policyId)
+  const tokenName = AssetName(metadata.tokenName)
+  const utxos = await provider.getUnspentOutputsWithAsset(
+    Address.fromBech32(metadata.scriptAddress), 
+    AssetId.fromParts(policyId, tokenName)
+  )
+  if (utxos.length !== 1) {
+    console.error("NFT count != 1")
+    process.exit()
   }
-  const scriptAddr = lucid.utils.validatorToAddress(validator)
-  console.log("Script address=" + scriptAddr)
+  const coreTxOut = utxos[0].toCore()[1]
+  const curCount = coreTxOut.datum.fields.items[0]
 
-  // Query the latest utxo with the NFT token. Our custom provider backend
-  // includes utxos created by mempool transactions and removes utxos
-  // that are spent by mempool transactions but have not yet been included
-  // into a block.
-  const scriptUtxos = await lucid.utxosAtWithUnit(scriptAddr, unit) 
-  if (scriptUtxos.length === 0) {
-    throw Error("No state utxos found")
-  }
-  // Sanity check that we only have one state utxo
-  if (scriptUtxos.length > 1) {
-    throw Error("Multiple state utxos encountered")
-  }
-  // Pull the datum from the state utxo. This is the current "state" of the
-  // script.
-  const stateUtxo = scriptUtxos[0]
+  // Compute datum value = zero
+  const fieldList = new PlutusList()
+  fieldList.add(PlutusData.newInteger(curCount + 1n))
+  const zeroCount = new ConstrPlutusData(0n, fieldList)
+  const datum = Datum.newInlineData(PlutusData.newConstrPlutusData(zeroCount))
 
-  // Deserialize using the state schema
-  const state = Data.from(stateUtxo.datum, CounterSchema)
-
-  console.log("State counter is currently " + state.counter)
-  state.counter++
-  console.log("Next state is " + state.counter)
-
-  try {
-
-    const tx = await lucid.newTx()
-      .collectFrom([stateUtxo], Data.void()) // no redeemer
-      .attachSpendingValidator(validator)
-      .payToContract(scriptAddr, { inline: Data.to(state, CounterSchema) }, { [unit]: 1n })
-      .complete()
-
-    const signedTx = await tx.sign().complete()
-    const txHash = await signedTx.submit()
-
-  } catch (err) {
-    console.log("Caught error: " + err)
-  }
+  // Send minted state token to script with 
+  const tokenMap = new Map()
+  tokenMap.set(AssetId.fromParts(policyId, tokenName), 1n)
+  const value = new Value(0n, tokenMap)
+  const incrementWalletHandler = await Blaze.from(provider, wallet)
+  const seedTx = await incrementWalletHandler
+    .newTransaction()
+    .addOutput(utxos[0])
+    .lockAssets(Address.fromBech32(scriptAddress), value, datum)
+    .complete()
+  const signedSeedTx = await incrementWalletHandler.signTransaction(seedTx)
+  const seedTxId = await incrementWalletHandler.provider.postTransactionToChain(signedSeedTx.toCbor())
+  console.log("Seed tx = " + seedTxId)
+  await provider.awaitTransactionConfirmation(seedTxId)
 
   process.exit()
 }
