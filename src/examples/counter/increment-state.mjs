@@ -14,6 +14,7 @@ import {
   ConstrPlutusData,
   PlutusList,
   Datum,
+  Script,
   PlutusV2Script,
   HexBlob
 } from '@blaze-cardano/core'
@@ -59,6 +60,7 @@ const main = async () => {
   console.log(scriptUtxos[0].output().toCbor())
 
   // Create script object
+  console.log("applied cbor = " + metadata.script)
   const script = PlutusV2Script.fromCbor(HexBlob(metadata.script))
   console.log("script hash = " + script.hash())
 
@@ -70,7 +72,7 @@ const main = async () => {
   const seedTx = await incrementWalletHandler
     .newTransaction()
     .addInput(scriptUtxos[0])
-    .provideScript(script)
+    .provideScript(Script.newPlutusV2Script(script))
     .lockAssets(Address.fromBech32(metadata.scriptAddress), value, datum)
     .complete()
   const signedSeedTx = await incrementWalletHandler.signTransaction(seedTx)

@@ -96,8 +96,12 @@ const main = async () => {
   )
 
   // Compute the script address for these params
-  const script = new PlutusV2Script(appliedCbor)
+  console.log("applied cbor = " + appliedCbor)
+  //const script = new PlutusV2Script(appliedCbor)
+  const script = PlutusV2Script.fromCbor(appliedCbor)
   console.log("script hash = " + script.hash())
+  const script2 = Script.newPlutusV2Script(script)
+  console.log("script2 hash = " + script.hash())
   const scriptAddress = Cardano.EnterpriseAddress.fromCredentials(NetworkId.Testnet, {
     hash: script.hash(),
     type: CredentialType.ScriptHash
