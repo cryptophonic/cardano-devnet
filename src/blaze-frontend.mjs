@@ -219,11 +219,23 @@ export class BlazeProviderFrontend extends Provider {
     return utxos
   }
 
-  async postTransactionToChain(cbor) {
+  async evaluateTransaction(tx, additionalUtxos) {
+    console.log(JSON.stringify(additionalUtxos))
+    const query = {
+      method: "evaluateTx",
+      params: {
+        cbor: tx.toCbor()
+      }
+    }
+    const res = await this.query(query)
+    return res
+  }
+
+  async postTransactionToChain(tx) {
     const query = {
       method: "submitTx",
       params: {
-        cbor: cbor
+        cbor: tx.toCbor()
       }
     }
     const txid = await this.query(query)

@@ -165,6 +165,14 @@ class ProviderBackend {
     return unspent
   }
 
+  async evaluateTx(params) {
+    if (this.debug) {
+      console.log("ProviderBackend::evaluateTx")
+    }
+    const res = await this.osrh.evaluateTx(params.cbor)
+    return res.transaction.id
+  }
+
   async submitTx(params) {
     if (this.debug) {
       console.log("ProviderBackend::submitTx")

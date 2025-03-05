@@ -71,12 +71,12 @@ const main = async () => {
   const incrementWalletHandler = await Blaze.from(provider, wallet)
   const seedTx = await incrementWalletHandler
     .newTransaction()
-    .addInput(scriptUtxos[0])
+    .addInput(scriptUtxos[0], PlutusData.newInteger(0n))
     .provideScript(Script.newPlutusV2Script(script))
     .lockAssets(Address.fromBech32(metadata.scriptAddress), value, datum)
     .complete()
   const signedSeedTx = await incrementWalletHandler.signTransaction(seedTx)
-  const seedTxId = await incrementWalletHandler.provider.postTransactionToChain(signedSeedTx.toCbor())
+  const seedTxId = await incrementWalletHandler.provider.postTransactionToChain(signedSeedTx)
   console.log("Seed tx = " + seedTxId)
   await provider.awaitTransactionConfirmation(seedTxId)
 

@@ -50,7 +50,7 @@ const main = async () => {
     .addOutput(new TransactionOutput(mintWallet.address, new Value(amount)))
     .complete()
   const signedFundingTx = await faucetHandler.signTransaction(fundingTx)
-  const fundingTxId = await faucetHandler.provider.postTransactionToChain(signedFundingTx.toCbor())
+  const fundingTxId = await faucetHandler.provider.postTransactionToChain(signedFundingTx)
   console.log("Funding tx = " + fundingTxId)
   await provider.awaitTransactionConfirmation(fundingTxId)
 
@@ -121,7 +121,7 @@ const main = async () => {
     .provideScript(Script.newNativeScript(nativeScript))
     .complete()
   const signedMintingTx = await mintWalletHandler.signTransaction(mintingTx)
-  const mintingTxId = await mintWalletHandler.provider.postTransactionToChain(signedMintingTx.toCbor())
+  const mintingTxId = await mintWalletHandler.provider.postTransactionToChain(signedMintingTx)
   console.log("Minting tx = " + mintingTxId)
   await provider.awaitTransactionConfirmation(mintingTxId)
 
@@ -148,7 +148,7 @@ const main = async () => {
     .lockAssets(Address.fromBech32(scriptAddress), value, datum)
     .complete()
   const signedSeedTx = await mintWalletHandler.signTransaction(seedTx)
-  const seedTxId = await mintWalletHandler.provider.postTransactionToChain(signedSeedTx.toCbor())
+  const seedTxId = await mintWalletHandler.provider.postTransactionToChain(signedSeedTx)
   console.log("Seed tx = " + seedTxId)
   await provider.awaitTransactionConfirmation(seedTxId)
   

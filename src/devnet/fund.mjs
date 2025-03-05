@@ -23,7 +23,7 @@ const main = async () => {
     .addOutput(new TransactionOutput(wallet.address, new Value(amount)))
     .complete()
   const signedFundingTx = await faucetHandler.signTransaction(fundingTx)
-  const fundingTxId = await faucetHandler.provider.postTransactionToChain(signedFundingTx.toCbor())
+  const fundingTxId = await faucetHandler.provider.postTransactionToChain(signedFundingTx)
   console.log("Funding tx = " + fundingTxId)
   await provider.awaitTransactionConfirmation(fundingTxId)
 

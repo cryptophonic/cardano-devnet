@@ -161,6 +161,25 @@ class OgmiosSynchronousRequestHandler {
     return obj.result
   }
 
+  async evaluateTx(tx) {
+    const obj = await new Promise(resolve => {
+      const id = this.send({
+        method: "evaluateTransaction",
+        params: {
+          transaction: {
+            cbor: tx
+          }
+        }
+      })
+      this.pending[id] = resolve
+    })
+    if (obj.error !== undefined) {
+      console.log(JSON.stringify(obj.error))
+      throw Error(obj.error.message)
+    }
+    return obj.result
+  }
+
   async submitTx(tx) {
     const obj = await new Promise(resolve => {
       const id = this.send({

@@ -72,7 +72,7 @@ const main = async () => {
     .complete()
 
   const signedTx = await blaze.signTransaction(tx)
-  const txId = await blaze.provider.postTransactionToChain(signedTx.toCbor())
+  const txId = await blaze.provider.postTransactionToChain(signedTx)
   console.log("Transaction sent: " + txId)
 
   process.exit()
