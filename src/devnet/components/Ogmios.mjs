@@ -114,7 +114,8 @@ class OgmiosSynchronousRequestHandler {
   send(jsonRpcObj) {
     jsonRpcObj.jsonrpc = "2.0"
     jsonRpcObj.id = this.nextId++
-    this.ogmiosServer.send(JSON.stringify(jsonRpcObj))
+    const request = JSON.stringify(jsonRpcObj)
+    this.ogmiosServer.send(request)
     return jsonRpcObj.id
   }
 
@@ -161,16 +162,18 @@ class OgmiosSynchronousRequestHandler {
     return obj.result
   }
 
-  async evaluateTx(tx) {
+  async evaluateTx(cbor, utxos) {
     const obj = await new Promise(resolve => {
-      const id = this.send({
+      const request = {
         method: "evaluateTransaction",
         params: {
           transaction: {
-            cbor: tx
-          }
+            cbor: cbor
+          },
+          additionalUtxo: utxos
         }
-      })
+      }
+      const id = this.send(request)
       this.pending[id] = resolve
     })
     if (obj.error !== undefined) {
@@ -180,19 +183,20 @@ class OgmiosSynchronousRequestHandler {
     return obj.result
   }
 
-  async submitTx(tx) {
+  async submitTx(cbor) {
     const obj = await new Promise(resolve => {
       const id = this.send({
         method: "submitTransaction",
         params: {
           transaction: {
-            cbor: tx
+            cbor: cbor
           }
         }
       })
       this.pending[id] = resolve
     })
     if (obj.error !== undefined) {
+      console.error(JSON.stringify(obj.error, null, 2))
       throw Error(obj.error.message)
     }
     return obj.result

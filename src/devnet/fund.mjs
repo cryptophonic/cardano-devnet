@@ -9,7 +9,7 @@ import { randomWallet, aliasWallet } from '../blaze-wallet.mjs'
 
 const wallet_name = process.argv[2]
 const amount = BigInt(Math.floor(process.argv[3] * 1000000.0))
-console.log("Funding wallet: " + wallet_name)
+console.log("Funding wallet: " + wallet_name + " " + amount + " lovelace")
 
 const main = async () => {
   const provider = new BlazeProviderFrontend("ws://localhost:1338")

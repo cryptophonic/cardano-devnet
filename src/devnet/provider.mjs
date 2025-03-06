@@ -169,7 +169,7 @@ class ProviderBackend {
     if (this.debug) {
       console.log("ProviderBackend::evaluateTx")
     }
-    const res = await this.osrh.evaluateTx(params.cbor)
+    const res = await this.osrh.evaluateTx(params.cbor, params.utxos)
     return res.transaction.id
   }
 

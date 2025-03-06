@@ -24,11 +24,9 @@ import {
   PlutusData,
   ConstrPlutusData,
   PlutusList,
-  Datum
+  Datum,
+  addressFromValidator
 } from '@blaze-cardano/core'
-import {
-  Cardano
-} from '@cardano-sdk/core'
 
 import { BlazeProviderFrontend } from '../../blaze-frontend.mjs'
 import { randomWallet, aliasWallet } from '../../blaze-wallet.mjs'
@@ -102,12 +100,8 @@ const main = async () => {
   console.log("script hash = " + script.hash())
   const script2 = Script.newPlutusV2Script(script)
   console.log("script2 hash = " + script.hash())
-  const scriptAddress = Cardano.EnterpriseAddress.fromCredentials(NetworkId.Testnet, {
-    hash: script.hash(),
-    type: CredentialType.ScriptHash
-  }).toAddress()
-    .toBech32()
-  console.log("Script address = " + scriptAddress)
+  const scriptAddress = addressFromValidator(NetworkId.Testnet, script)
+  console.log("Script address = " + scriptAddress.toBech32())
 
   // Mint one token
   const amountsToMint = new Map()
@@ -128,7 +122,7 @@ const main = async () => {
   // Write metadata
   fs.writeFileSync("metadata.json", JSON.stringify({
     script: appliedCbor,
-    scriptAddress: scriptAddress,
+    scriptAddress: scriptAddress.toBech32(),
     policyId: policyId,
     tokenName: tokenName
   }))
@@ -145,7 +139,7 @@ const main = async () => {
   const value = new Value(0n, tokenMap)
   const seedTx = await mintWalletHandler
     .newTransaction()
-    .lockAssets(Address.fromBech32(scriptAddress), value, datum)
+    .lockAssets(scriptAddress, value, datum)
     .complete()
   const signedSeedTx = await mintWalletHandler.signTransaction(seedTx)
   const seedTxId = await mintWalletHandler.provider.postTransactionToChain(signedSeedTx)

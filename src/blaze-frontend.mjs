@@ -21,6 +21,10 @@ import {
 
 const TESTNET_ID = 42
 
+BigInt.prototype.toJSON = function () {
+  return Number(this);
+}
+
 export class BlazeProviderFrontend extends Provider {
 
   constructor(url) {
@@ -98,6 +102,45 @@ export class BlazeProviderFrontend extends Provider {
     return new TransactionUnspentOutput(txIn, txOut)
   }
 
+  serializeUtxos(unspentOutputs) {
+    return unspentOutputs.map((output) => {
+      const out = output.output()
+      const address = out.address().toBech32()
+      const ada = out.amount().coin().valueOf()
+      const value = { ada: { lovelace: ada } }
+      const multiAsset = out.amount().multiasset?.()
+      multiAsset?.forEach((assets, assetId) => {
+        const policyID = AssetId.getPolicyId(assetId)
+        const assetName = AssetId.getAssetName(assetId)
+        value[policyID] ?? (value[policyID] = {})
+        value[policyID][assetName] = assets
+      })
+      const datumHash = out.datum()?.asDataHash()?.toString()
+      const datum = out.datum()?.asInlineData()?.toCbor()
+      const scriptRef = out.scriptRef()
+      let script
+      if (scriptRef) {
+        const langIndex = scriptRef.language()
+        const language = _Kupmios.plutusVersions[langIndex - 1]
+        script = {
+          language: language || "native",
+          cbor: langIndex === 0 ? scriptRef.toCbor() : scriptRef[`asPlutusV${langIndex}`]().rawBytes()
+        }
+      }
+      return {
+        transaction: {
+          id: output.input().transactionId().toString()
+        },
+        index: Number(output.input().index()),
+        address,
+        value,
+        datumHash,
+        datum,
+        script
+      }
+    })
+  }
+
   async waitBlock() {
     return await this.query({
       method: "waitBlock"
@@ -114,23 +157,26 @@ export class BlazeProviderFrontend extends Provider {
     })
   }
 
+  fromDevnetLanguageVersion(x) {
+    if (x === "plutus:v1") return PlutusLanguageVersion.V1
+    if (x === "plutus:v2") return PlutusLanguageVersion.V2
+    if (x === "plutus:v3") return PlutusLanguageVersion.V3
+    throw new Error("Unknown plutus language version")
+  }
+
   async getParameters() {
     const obj = await this.query({
       method: "queryProtocolParameters"
     })
     const costModels = new Map()
-    Object.keys(obj.plutusCostModels).map(cm => {
-      let key = PlutusLanguageVersion.V1
-      if (cm === "plutus:v1") key = PlutusLanguageVersion.V1
-      if (cm === "plutus:v2") key = PlutusLanguageVersion.V2
-      if (cm === "plutus:v3") key = PlutusLanguageVersion.V3
-      costModels.set(key, obj.plutusCostModels[cm])
-    })
+    for (const [key, value] of Object.entries(obj.plutusCostModels)) {
+      costModels.set(this.fromDevnetLanguageVersion(key), value)
+    }
     const parseRatio = (ratio) => {
       const [numerator, denominator] = ratio.split("/").map(Number)
       return numerator / denominator
     }
-    return {
+    const ret = {
       coinsPerUtxoByte: obj.minUtxoDepositCoefficient,
       maxTxSize: obj.maxTransactionSize.bytes,
       minFeeCoefficient: obj.minFeeCoefficient,
@@ -149,7 +195,7 @@ export class BlazeProviderFrontend extends Provider {
       maxValueSize: obj.maxValueSize.bytes,
       collateralPercentage: obj.collateralPercentage,
       maxCollateralInputs: obj.maxCollateralInputs,
-      costModels: costModels,
+      costModels,
       prices: {
         memory: parseRatio(obj.scriptExecutionPrices.memory),
         steps: parseRatio(obj.scriptExecutionPrices.cpu),
@@ -162,7 +208,9 @@ export class BlazeProviderFrontend extends Provider {
         memory: obj.maxExecutionUnitsPerBlock.memory,
         steps: obj.maxExecutionUnitsPerBlock.cpu,
       },
+      minFeeReferenceScripts: obj.minFeeReferenceScripts
     } 
+    return ret
   }
 
   async getUnspentOutputs(address) {
@@ -220,13 +268,15 @@ export class BlazeProviderFrontend extends Provider {
   }
 
   async evaluateTransaction(tx, additionalUtxos) {
-    console.log(JSON.stringify(additionalUtxos))
+    const additional_utxos = this.serializeUtxos(additionalUtxos)
     const query = {
       method: "evaluateTx",
       params: {
-        cbor: tx.toCbor()
+        cbor: tx.toCbor(),
+        utxos: additional_utxos
       }
     }
+    console.log(JSON.stringify(query, null, 2))
     const res = await this.query(query)
     return res
   }

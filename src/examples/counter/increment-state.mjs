@@ -69,6 +69,7 @@ const main = async () => {
   tokenMap.set(AssetId.fromParts(PolicyId(policyId), AssetName(tokenName)), 1n)
   const value = new Value(0n, tokenMap)
   const incrementWalletHandler = await Blaze.from(provider, wallet)
+  console.log(scriptUtxos[0].toCbor())
   const seedTx = await incrementWalletHandler
     .newTransaction()
     .addInput(scriptUtxos[0], PlutusData.newInteger(0n))
