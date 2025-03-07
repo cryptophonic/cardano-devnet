@@ -1,5 +1,11 @@
 #!/usr/bin/env bash
 
+if [[ $1 == addr_test1* ]]; then
+  echo "Usage: fund <alias> <ada amount>"
+  echo "This fund script is meant for alias wallet names. Use transfer with bech32 addresses instead."
+  exit 1
+fi
+
 if [ ! -f $CARDANO_CLI_GURU/assets/addr/$1.addr ]; then
   key-gen $1
 fi

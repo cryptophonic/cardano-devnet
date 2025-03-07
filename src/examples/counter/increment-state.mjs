@@ -24,7 +24,7 @@ import { aliasWallet } from '../../blaze-wallet.mjs'
 
 const main = async () => {
   if (process.argv.length !== 3) {
-    console.log("Usage: node increment-state.mjs <wallet_name>")
+    console.error("Usage: node increment-state.mjs <wallet_name>")
     process.exit()
   }
 

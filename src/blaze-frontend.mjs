@@ -16,7 +16,11 @@ import {
   TransactionOutput,
   TransactionUnspentOutput,
   Value,
-  toHex
+  toHex,
+  ExUnits,
+  Redeemers,
+  RedeemerPurpose,
+  RedeemerTag
  } from "@blaze-cardano/core"
 
 const TESTNET_ID = 42
@@ -267,18 +271,52 @@ export class BlazeProviderFrontend extends Provider {
     return utxos
   }
 
+  purposeToTag(key) {
+    if (RedeemerPurpose.spend) return RedeemerTag.Spend
+    if (RedeemerPurpose.mint) return RedeemerTag.Mint
+    if (RedeemerPurpose.certificate) return RedeemerTag.Cert
+    if (RedeemerPurpose.withdrawal) return RedeemerTag.Reward
+    if (RedeemerPurpose.vote) return RedeemerTag.Voting
+    if (RedeemerPurpose.propose) return RedeemerTag.Proposing
+  }
+
   async evaluateTransaction(tx, additionalUtxos) {
+    // Quick fail if no redeemers
+    const redeemers = tx.witnessSet().redeemers().values()
+    if (!redeemers) {
+      throw new Error("Cannot evaluate without redeemers!")
+    }    
+
     const additional_utxos = this.serializeUtxos(additionalUtxos)
     const query = {
       method: "evaluateTx",
       params: {
-        cbor: tx.toCbor(),
-        utxos: additional_utxos
+        cbor: tx.toCbor()
+        //utxos: additional_utxos
       }
     }
-    console.log(JSON.stringify(query, null, 2))
     const res = await this.query(query)
-    return res
+
+    const updatedRedeemers = res.map(redeemerData => {
+      const exUnits = ExUnits.fromCore({
+        memory: redeemerData.budget.memory,
+        steps: redeemerData.budget.cpu,
+      })
+
+      const redeemer = redeemers.find(x => Number(x.index()) === redeemerData.validator.index &&
+        // TODO: RedeemerPurpose enum's indexes are still inconsistent. They are not the same as RedeemerTag values.
+        x.tag() === this.purposeToTag(redeemerData.validator.purpose)
+      ) 
+
+      if (!redeemer) {
+        throw new Error("endpoint returned extraneous redeemer data")
+      }
+
+      redeemer.setExUnits(exUnits);
+      return redeemer.toCore();
+    })
+
+    return Redeemers.fromCore(updatedRedeemers)
   }
 
   async postTransactionToChain(tx) {

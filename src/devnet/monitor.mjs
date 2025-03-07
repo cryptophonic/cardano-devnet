@@ -157,9 +157,15 @@ const formatTx = tx => {
       if (nameLookup[output.address] !== undefined) {
         line += nameLookup[output.address]
       }
+      log.info("line=" + line)
       const value = output.value.ada.lovelace / 1000000.0
       const vStr = "₳ " + value.toFixed(6)
+      log.info("value=" + value)
       str += " ".repeat(70 - key.length) + " -->    " + line
+      log.info(JSON.stringify(output))
+      log.info("address: " + output.address.length)
+      log.info("line: " + line.length)
+      log.info("vstr: " + vStr.length)
       str += " ".repeat(output.address.length - line.length - vStr.length)
       str += colorValue(vStr)
     }
@@ -207,6 +213,7 @@ class ChainEventHandler {
       if (fs.existsSync(alias_path)) {
         const alias = fs.readFileSync(alias_path)
         addressLookup[alias] = addr
+        log.info("adding alias for " + addr + ": " + alias)
         nameLookup[addr] = alias
       }
     }
