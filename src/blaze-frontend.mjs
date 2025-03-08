@@ -95,6 +95,7 @@ export class BlazeProviderFrontend extends Provider {
     )
     if (utxo.datum !== undefined) {
       const datum = Datum.newInlineData(PlutusData.fromCbor(HexBlob(utxo.datum)))
+      console.log("Provider datum = " + datum.toCbor())
       txOut.setDatum(datum)
     } else if (utxo.datumHash !== undefined) {
       const datum = Datum.newDataHash(DatumHash(utxo.datumHash))
@@ -107,6 +108,8 @@ export class BlazeProviderFrontend extends Provider {
   }
 
   serializeUtxos(unspentOutputs) {
+    console.log("Frontend::serializeUtxos")
+    console.log(new Error().stack)
     return unspentOutputs.map((output) => {
       const out = output.output()
       const address = out.address().toBech32()
@@ -271,6 +274,22 @@ export class BlazeProviderFrontend extends Provider {
     return utxos
   }
 
+  async getUnspentOutputByNFT(unit) {
+    console.log("Frontend::getUnspentOutputByNFT")
+  }
+
+  resolveUnspentOutputs(txIns) {
+    console.log("Frontend::resolveUnspentOutputs")
+  }
+
+  resolveDatum(datumHash) {
+    console.log("Frontend::resolveDatum")
+  }
+
+  resolveScriptRef(script, address) {
+    console.log("Frontend::resolveScriptRef")
+  }
+
   purposeToTag(key) {
     if (RedeemerPurpose.spend) return RedeemerTag.Spend
     if (RedeemerPurpose.mint) return RedeemerTag.Mint
@@ -287,7 +306,7 @@ export class BlazeProviderFrontend extends Provider {
       throw new Error("Cannot evaluate without redeemers!")
     }    
 
-    const additional_utxos = this.serializeUtxos(additionalUtxos)
+    //const additional_utxos = this.serializeUtxos(additionalUtxos)
     const query = {
       method: "evaluateTx",
       params: {
@@ -332,45 +351,3 @@ export class BlazeProviderFrontend extends Provider {
   }
 
 }
-
-const main = async () => {
-  const provider = new BlazeProviderFrontend("ws://localhost:1338")
-  await provider.init()
-
-  //console.log("Waiting for block...")
-  //const block = await provider.waitBlock()
-  //console.log("Block received: height=" + block.height)
-  //const params = await provider.getParameters()
-  //console.log(JSON.stringify(params, null, 2))
-  //const outputs = await provider.getUnspentOutputs(Core.addressFromBech32(
-    //"addr_test1vztc80na8320zymhjekl40yjsnxkcvhu58x59mc2fuwvgkc332vxv"
-  //))
-  const outputs = await provider.getUnspentOutputsWithAsset(
-    Core.addressFromBech32("addr_test1vztc80na8320zymhjekl40yjsnxkcvhu58x59mc2fuwvgkc332vxv"),
-    AssetId.fromParts("2e03063c4f133ec23b2467b3eccb7c4f433b06264d3ba893bcb72d7f",
-      toHex(Buffer.from("counter-token", "utf8"))
-    )
-  )
-  console.log(JSON.stringify(outputs, null, 2))
-  for (let i=0; i<outputs.length; i++) {
-    console.log(outputs[i].toCbor())
-  }
-
-  process.exit()
-}
-
-//main()
-
-/*
-    const alwaysTrueScript: Script = Script.newPlutusV2Script(
-      new PlutusV2Script(HexBlob("510100003222253330044a229309b2b2b9a1")),
-    );
-    const scriptAddress = addressFromValidator(
-      NetworkId.Testnet,
-      alwaysTrueScript,
-    );
-    const output = new TransactionOutput(
-      scriptAddress,
-      value.makeValue(1_000_000n),
-    );
-*/

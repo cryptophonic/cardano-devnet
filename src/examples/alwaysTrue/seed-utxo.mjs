@@ -65,7 +65,7 @@ const main = async () => {
     scriptAddress: scriptAddressV2.toBech32()
   }))
 
-  // Data.to(new Constr(0, [[]]))
+  // Null datum: Data.to(new Constr(0, [[]]))
   const insideList = new PlutusList()
   const fieldList = new PlutusList()
   fieldList.add(PlutusData.newList(insideList))
