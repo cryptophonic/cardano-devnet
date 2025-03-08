@@ -36,8 +36,8 @@ const main = async () => {
   await provider.init()
 
   // Grab a random wallet
-  const mintWallet = randomWallet(provider)
-  console.log("Created mint wallet = " + mintWallet.address.toBech32())
+  const seedWallet = randomWallet(provider)
+  console.log("Created seed wallet = " + seedWallet.address.toBech32())
 
   // Fund the wallet from the devnet faucet
   const faucet = aliasWallet("faucet", provider)
@@ -45,104 +45,44 @@ const main = async () => {
   const faucetHandler = await Blaze.from(provider, faucet)
   const fundingTx = await faucetHandler
     .newTransaction()
-    .addOutput(new TransactionOutput(mintWallet.address, new Value(amount)))
+    .addOutput(new TransactionOutput(seedWallet.address, new Value(amount)))
     .complete()
   const signedFundingTx = await faucetHandler.signTransaction(fundingTx)
   const fundingTxId = await faucetHandler.provider.postTransactionToChain(signedFundingTx)
   console.log("Funding tx = " + fundingTxId)
   await provider.awaitTransactionConfirmation(fundingTxId)
 
-  /* Create native minting script
-  {
-    "type": "all",
-    "scripts": [
-      { 
-        "type": "sig", 
-        "keyHash": <mint wallet pubkey hash>
-      }
-    ]
-  }
-  */
-  
-  const pubKeyScript = new ScriptPubkey()
-  pubKeyScript.setKeyHash(
-    Ed25519KeyHashHex(mintWallet.address.toBytes().slice(2))
-  )
-  const allScript = new ScriptAll()
-  allScript.setNativeScripts([pubKeyScript])
-
-  const nativeScript = NativeScript.newScriptAll(allScript)
-
-  // Determine the asset id
-  const policyId = nativeScript.hash()
-  console.log("Policy ID = " + policyId)
-  const tokenNameBytes = Buffer.from("counter-token", "utf8")
-  const tokenName = toHex(tokenNameBytes)
-  console.log("Token Name = " + tokenName)
-
-  // Load the counter script and apply the policy ID and name as parameters
-  const aikenPlutus = JSON.parse(fs.readFileSync("./aiken/plutus.json"))
-  const rawCbor = aikenPlutus.validators.reduce((acc, v) => {
-    if (v.title === "counter.increment.spend") {
-      acc = v.compiledCode
-    }
-    return acc
-  }, undefined)
-  const appliedCbor = applyParams(HexBlob(rawCbor), 
-    PlutusData.newBytes(Buffer.from(policyId, "hex")),
-    PlutusData.newBytes(tokenNameBytes)
+  const alwaysTrueV2 = Script.newPlutusV2Script(
+    new PlutusV2Script(HexBlob("510100003222253330044a229309b2b2b9a1"))
   )
 
-  // Compute the script address for these params
-  console.log("applied cbor = " + appliedCbor)
-  //const script = new PlutusV2Script(appliedCbor)
-  const script = PlutusV2Script.fromCbor(appliedCbor)
-  console.log("script hash = " + script.hash())
-  const script2 = Script.newPlutusV2Script(script)
-  console.log("script2 hash = " + script.hash())
-  const scriptAddress = addressFromValidator(NetworkId.Testnet, script)
-  console.log("Script address = " + scriptAddress.toBech32())
-
-  // Mint one token
-  const amountsToMint = new Map()
-  amountsToMint.set(tokenName, BigInt(1))
-
-  // Submit minting transaction
-  const mintWalletHandler = await Blaze.from(provider, mintWallet)
-  const mintingTx = await mintWalletHandler
-    .newTransaction()
-    .addMint(policyId, amountsToMint)
-    .provideScript(Script.newNativeScript(nativeScript))
-    .complete()
-  const signedMintingTx = await mintWalletHandler.signTransaction(mintingTx)
-  const mintingTxId = await mintWalletHandler.provider.postTransactionToChain(signedMintingTx)
-  console.log("Minting tx = " + mintingTxId)
-  await provider.awaitTransactionConfirmation(mintingTxId)
+  const scriptAddressV2 = addressFromValidator(NetworkId.Testnet, alwaysTrueV2)
+  console.log("Script address = " + scriptAddressV2.toBech32())
 
   // Write metadata
   fs.writeFileSync("metadata.json", JSON.stringify({
-    script: appliedCbor,
-    scriptAddress: scriptAddress.toBech32(),
-    policyId: policyId,
-    tokenName: tokenName
+    script: alwaysTrueV2.toCbor(),
+    scriptAddress: scriptAddressV2.toBech32()
   }))
 
-  // Compute datum value = zero
+  // Data.to(new Constr(0, [[]]))
+  const insideList = new PlutusList()
   const fieldList = new PlutusList()
-  fieldList.add(PlutusData.newInteger(0n))
+  fieldList.add(PlutusData.newList(insideList))
   const zeroCount = new ConstrPlutusData(0n, fieldList)
   const datum = Datum.newInlineData(PlutusData.newConstrPlutusData(zeroCount))
+  // Compute datum value = zero
+  //const datum = Datum.newInlineData(PlutusData.newInteger(0n))
+  //console.log("datum cbor = " + datum.toCbor())
 
-  // Send minted state token to script with 
-  const tokenMap = new Map()
-  tokenMap.set(AssetId.fromParts(PolicyId(policyId), AssetName(tokenName)), 1n)
-  const value = new Value(0n, tokenMap)
-  const seedTx = await mintWalletHandler
+  // Send lovelace to script with datum
+  const seedWalletHandler = await Blaze.from(provider, seedWallet)
+  const seedTx = await seedWalletHandler
     .newTransaction()
-    .lockAssets(scriptAddress, value, datum)
+    .lockLovelace(scriptAddressV2, 5_000_000n, datum)
     .complete()
-  const signedSeedTx = await mintWalletHandler.signTransaction(seedTx)
-  const seedTxId = await mintWalletHandler.provider.postTransactionToChain(signedSeedTx)
+  const signedSeedTx = await seedWalletHandler.signTransaction(seedTx)
+  const seedTxId = await seedWalletHandler.provider.postTransactionToChain(signedSeedTx)
   console.log("Seed tx = " + seedTxId)
   await provider.awaitTransactionConfirmation(seedTxId)
   

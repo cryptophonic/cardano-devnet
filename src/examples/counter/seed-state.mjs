@@ -133,7 +133,7 @@ const main = async () => {
   const zeroCount = new ConstrPlutusData(0n, fieldList)
   const datum = Datum.newInlineData(PlutusData.newConstrPlutusData(zeroCount))
 
-  // Send minted state token to script with 
+  // Send minted state token to script with datum
   const tokenMap = new Map()
   tokenMap.set(AssetId.fromParts(PolicyId(policyId), AssetName(tokenName)), 1n)
   const value = new Value(0n, tokenMap)

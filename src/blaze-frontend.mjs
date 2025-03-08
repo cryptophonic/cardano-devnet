@@ -320,6 +320,7 @@ export class BlazeProviderFrontend extends Provider {
   }
 
   async postTransactionToChain(tx) {
+    console.log(tx.toCbor())
     const query = {
       method: "submitTx",
       params: {
