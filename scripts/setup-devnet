@@ -27,7 +27,7 @@ mkdir -p "$TARGETDIR/assets/keys"
 mkdir -p "$TARGETDIR/assets/addr"
 
 cp "$BASEDIR"/config/genesis/* "$TARGETDIR"
-cp "$BASEDIR"/config/protocol-parameters.json "$TARGETDIR"
+#cp "$BASEDIR"/config/protocol-parameters.json "$TARGETDIR"
 cp "$BASEDIR"/config/credentials/faucet.*key "$TARGETDIR/assets/keys"
 cp "$BASEDIR"/config/credentials/faucet.addr "$TARGETDIR/assets/addr"
 

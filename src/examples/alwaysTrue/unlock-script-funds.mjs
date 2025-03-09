@@ -41,12 +41,26 @@ const main = async () => {
   }
   const input = new TransactionUnspentOutput()
 
+  const precomplete = async (builder) => {
+    console.log("here")
+    console.log(JSON.stringify(builder.params, null, 2))
+    for (let i=0; i<3; i++) {
+      const model = builder.params.costModels.get(i)
+      const str = model.reduce((acc, el) => {
+        return acc + " " + el
+      }, "[")
+      console.log(i + " (" + model.length + " elements): " + str + "]")
+    }    
+  }
+
   const walletHandler = await Blaze.from(provider, wallet)
   const tx = await walletHandler
     .newTransaction()
+    .addPreCompleteHook(precomplete)
     .addInput(scriptUtxos[0], PlutusData.newInteger(0n))
     .provideScript(alwaysTrueV2)
     .complete()
+  console.log(tx.toCbor())
   const signedTx = await walletHandler.signTransaction(tx)
   const txId = await walletHandler.provider.postTransactionToChain(signedTx)
   console.log("tx = " + txId)

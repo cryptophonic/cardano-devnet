@@ -176,8 +176,11 @@ export class BlazeProviderFrontend extends Provider {
       method: "queryProtocolParameters"
     })
     const costModels = new Map()
+    //const lengths = [166, 175, 297]
+    let i = 0
     for (const [key, value] of Object.entries(obj.plutusCostModels)) {
-      costModels.set(this.fromDevnetLanguageVersion(key), value)
+      costModels.set(this.fromDevnetLanguageVersion(key), value) //.slice(0, lengths[i]))
+      i = i + 1
     }
     const parseRatio = (ratio) => {
       const [numerator, denominator] = ratio.split("/").map(Number)
