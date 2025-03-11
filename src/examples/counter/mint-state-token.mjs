@@ -2,7 +2,7 @@ import fs from 'fs'
 
 import { Lucid, fromText } from 'lucid-cardano'
 import { LucidProviderFrontend } from '../../lucid-frontend.mjs'
-import { loadAddress, loadPrivateKey } from '../../key-utils.mjs'
+import { loadPrivateKey } from '../../key-utils.mjs'
 
 const main = async () => {
   const provider = new LucidProviderFrontend("ws://localhost:1338")

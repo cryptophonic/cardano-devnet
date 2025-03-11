@@ -1,33 +1,24 @@
 import { WebSocket } from 'ws'
+import { EventEmitter } from 'events'
 
-export { OgmiosConnection, OgmiosStateMachine, OgmiosSynchronousRequestHandler }
+export { OgmiosStateMachine, OgmiosSynchronousRequestHandler }
 
-class OgmiosConnection {
+class OgmiosStateMachine extends EventEmitter {
 
-  constructor(port, stateMachine, synchronousRequestHandler) {
-    // Ogmios connection
+  constructor(port) {
+    super()
     this.ogmiosServer = new WebSocket("ws://localhost:" + port)
     this.nextId = 0
-    this.stateMachine = stateMachine
-    this.synchronousRequestHandler = synchronousRequestHandler
 
     this.ogmiosServer.once('open', async () => {
-      if (this.stateMachine !== undefined ) {
-        await this.stateMachine.init(this)
-      }
-      if (this.synchronousRequestHandler !== undefined) {
-        await this.synchronousRequestHandler.init(this)
-      }
+      this.init()
     })
 
     this.ogmiosServer.on('message', msg => {
       const response = JSON.parse(msg)
-      if (this.stateMachine[response.method] !== undefined) {
-        // Send to the state machine
-        this.stateMachine[response.method](response)
-      } else {
-        // Send to the response handler
-        this.synchronousRequestHandler.handleResponse(response)
+      if (this[response.method] !== undefined) {
+        // Send to the response method
+        this[response.method](response)
       }
     })
   }
@@ -39,65 +30,48 @@ class OgmiosConnection {
     return jsonRpcObj.id
   }
 
-}
-
-class OgmiosStateMachine {
-
-  constructor(indexer) {
-    this.indexer = indexer
-    this.blockCallbacks = []
-  }
-
   async init(ogmios) {
-    this.ogmios = ogmios
-
     // Initiate sync and mempool monitoring
-    this.ogmios.send({
+    this.send({
       method: "findIntersection",
       params: {
         points: ["origin"]
       }
     })
-    this.ogmios.send({
+    this.send({
       method: "acquireMempool"
     })
   }
 
-  addCallback(cb) {
-    this.blockCallbacks.push(cb)
-  }
-
   findIntersection(msg) {
-    this.ogmios.send({
+    this.send({
       method: "nextBlock"
     })
   }
 
   nextBlock(msg) {
     if (msg.result.block !== undefined) {
-      // Trigger callbacks if any
-      this.blockCallbacks.map(cb => {
-        cb(msg.result.block)
-      })
+      this.emit('block', msg.result.block)
     }
-    // Clear callback
-    this.ogmios.send({
+    this.send({
       method: "nextBlock"
     })
   }
 
   acquireMempool(msg) {
-    this.ogmios.send({
+    this.send({
       method: "nextTransaction",
       params: {
         fields: "all"
       }
     })
+    this.emit('mempoolStart')
   }
 
   releaseMempool(msg) {
+    this.emit('mempoolStop')
     setTimeout(() => {
-      this.ogmios.send({
+      this.send({
         method: "acquireMempool"
       })
     }, 1000)
@@ -105,11 +79,12 @@ class OgmiosStateMachine {
 
   nextTransaction(msg) {
     if (msg.result.transaction === null) {
-      this.ogmios.send({
+      this.send({
         method: "releaseMempool"
       })
     } else {
-      this.ogmios.send({
+      this.emit('transaction', msg.result.transaction)
+      this.send({
         method: "nextTransaction",
         params: {
           fields: "all"
@@ -122,12 +97,26 @@ class OgmiosStateMachine {
 
 class OgmiosSynchronousRequestHandler {
 
-  constructor() {
+  constructor(port) {
+    this.ogmiosServer = new WebSocket("ws://localhost:" + port)
+    this.nextId = 0
     this.pending = {}
+
+    this.ogmiosServer.on('message', msg => {
+      const obj = JSON.parse(msg)
+      if (this.pending[obj.id] !== undefined) {
+        this.pending[obj.id](obj)
+        delete this.pending[obj.id]
+      }
+    })
   }
 
-  async init(ogmios) {
-    this.ogmios = ogmios
+  send(jsonRpcObj) {
+    jsonRpcObj.jsonrpc = "2.0"
+    jsonRpcObj.id = this.nextId++
+    const request = JSON.stringify(jsonRpcObj)
+    this.ogmiosServer.send(request)
+    return jsonRpcObj.id
   }
 
   handleResponse(obj) {
@@ -139,7 +128,7 @@ class OgmiosSynchronousRequestHandler {
 
   async acquireLedgerState() {
     const obj = await new Promise(resolve => {
-      const id = this.ogmios.send({
+      const id = this.send({
         method: "acquireLedgerState",
         params: {
           point: {
@@ -158,14 +147,14 @@ class OgmiosSynchronousRequestHandler {
   }
 
   async releaseLedgerState() {
-    this.ogmios.send({
+    this.send({
       method: "releaseLedgerState"
     })
   }
 
   async queryProtocolParameters() {
     const obj = await new Promise(resolve => {
-      const id = this.ogmios.send({
+      const id = this.send({
         method: "queryLedgerState/protocolParameters"
       })
       this.pending[id] = resolve
@@ -173,29 +162,41 @@ class OgmiosSynchronousRequestHandler {
     return obj.result
   }
 
-  async queryProposedProtocolParameters() {
+  async evaluateTx(cbor, utxos) {
     const obj = await new Promise(resolve => {
-      const id = this.ogmios.send({
-        method: "queryLedgerState/proposedProtocolParameters"
-      })
+      const request = {
+        method: "evaluateTransaction",
+        params: {
+          transaction: {
+            cbor: cbor
+          },
+          additionalUtxo: utxos
+        }
+      }
+      const id = this.send(request)
       this.pending[id] = resolve
     })
+    if (obj.error !== undefined) {
+      console.log(JSON.stringify(obj.error))
+      throw Error(obj.error.message)
+    }
     return obj.result
   }
 
-  async submitTx(tx) {
+  async submitTx(cbor) {
     const obj = await new Promise(resolve => {
-      const id = this.ogmios.send({
+      const id = this.send({
         method: "submitTransaction",
         params: {
           transaction: {
-            cbor: tx
+            cbor: cbor
           }
         }
       })
       this.pending[id] = resolve
     })
     if (obj.error !== undefined) {
+      console.error(JSON.stringify(obj.error, null, 2))
       throw Error(obj.error.message)
     }
     return obj.result
