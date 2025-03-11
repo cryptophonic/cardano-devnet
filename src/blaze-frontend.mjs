@@ -31,11 +31,12 @@ BigInt.prototype.toJSON = function () {
 
 export class BlazeProviderFrontend extends Provider {
 
-  constructor(url) {
+  constructor(url, debug=false) {
     super(TESTNET_ID)
     this.url = url
     this.nextId = 0
     this.queue = {}
+    this.debug = debug
   }
 
   async init() {
@@ -95,7 +96,6 @@ export class BlazeProviderFrontend extends Provider {
     )
     if (utxo.datum !== undefined) {
       const datum = Datum.newInlineData(PlutusData.fromCbor(HexBlob(utxo.datum)))
-      console.log("Provider datum = " + datum.toCbor())
       txOut.setDatum(datum)
     } else if (utxo.datumHash !== undefined) {
       const datum = Datum.newDataHash(DatumHash(utxo.datumHash))
@@ -108,8 +108,9 @@ export class BlazeProviderFrontend extends Provider {
   }
 
   serializeUtxos(unspentOutputs) {
-    console.log("Frontend::serializeUtxos")
-    console.log(new Error().stack)
+    if (this.debug) {
+      console.log("Frontend::serializeUtxos")
+    }
     return unspentOutputs.map((output) => {
       const out = output.output()
       const address = out.address().toBech32()
@@ -176,7 +177,7 @@ export class BlazeProviderFrontend extends Provider {
       method: "queryProtocolParameters"
     })
     const costModels = new Map()
-    //const lengths = [166, 175, 297]
+    //const lengths = [166, 175, 179]
     let i = 0
     for (const [key, value] of Object.entries(obj.plutusCostModels)) {
       costModels.set(this.fromDevnetLanguageVersion(key), value) //.slice(0, lengths[i]))
@@ -278,19 +279,27 @@ export class BlazeProviderFrontend extends Provider {
   }
 
   async getUnspentOutputByNFT(unit) {
-    console.log("Frontend::getUnspentOutputByNFT")
+    if (this.debug) {
+      console.log("Frontend::getUnspentOutputByNFT")
+    }
   }
 
   resolveUnspentOutputs(txIns) {
-    console.log("Frontend::resolveUnspentOutputs")
+    if (this.debug) {
+      console.log("Frontend::resolveUnspentOutputs")
+    }
   }
 
   resolveDatum(datumHash) {
-    console.log("Frontend::resolveDatum")
+    if (this.debug) {
+      console.log("Frontend::resolveDatum")
+    }
   }
 
   resolveScriptRef(script, address) {
-    console.log("Frontend::resolveScriptRef")
+    if (this.debug) {
+      console.log("Frontend::resolveScriptRef")
+    }
   }
 
   purposeToTag(key) {
@@ -342,7 +351,6 @@ export class BlazeProviderFrontend extends Provider {
   }
 
   async postTransactionToChain(tx) {
-    console.log(tx.toCbor())
     const query = {
       method: "submitTx",
       params: {
