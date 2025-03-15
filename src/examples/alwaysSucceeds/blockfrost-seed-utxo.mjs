@@ -2,25 +2,12 @@ import fs from 'fs'
 
 import {
   Blaze,
-  applyParams
 } from '@blaze-cardano/sdk'
 import {
-  Address,
-  TransactionOutput,
-  Value,
-  AssetId,
-  PolicyId,
-  AssetName,
   NetworkId,
-  ScriptPubkey,
-  Ed25519KeyHashHex,
-  ScriptAll,
-  NativeScript,
   Script,
-  toHex,
   HexBlob,
   PlutusV2Script,
-  CredentialType,
   PlutusData,
   ConstrPlutusData,
   PlutusList,
@@ -39,7 +26,6 @@ const main = async () => {
     projectId: config.blockfrost_project_id
   })
 
-  // Grab a random wallet
   const seedWallet = aliasWallet("seed", provider)
   console.log("Loaded seed wallet = " + seedWallet.address.toBech32())
 
