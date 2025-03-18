@@ -71,7 +71,6 @@ const main = async () => {
   )
   const allScript = new ScriptAll()
   allScript.setNativeScripts([pubKeyScript])
-
   const nativeScript = NativeScript.newScriptAll(allScript)
 
   // Determine the asset id
