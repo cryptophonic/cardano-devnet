@@ -2,33 +2,16 @@ import fs from 'fs'
 
 import {
   Blaze,
-  applyParams
 } from '@blaze-cardano/sdk'
 import {
-  TransactionOutput,
-  Value,
-  AssetId,
-  PolicyId,
-  AssetName,
-  NetworkId,
-  ScriptPubkey,
-  Ed25519KeyHashHex,
   ScriptAll,
   NativeScript,
   Script,
   toHex,
-  fromHex,
-  HexBlob,
-  PlutusV3Script,
-  PlutusData,
-  ConstrPlutusData,
-  PlutusList,
-  Datum,
-  addressFromValidator
 } from '@blaze-cardano/core'
 
 import { BlazeProviderFrontend } from '../../blaze-frontend.mjs'
-import { randomWallet, aliasWallet } from '../../blaze-wallet.mjs'
+import { aliasWallet } from '../../blaze-wallet.mjs'
 
 const main = async () => {
   if (process.argv.length !== 5) {
@@ -63,6 +46,12 @@ const main = async () => {
   console.log("Policy ID = " + policyId)
   const tokenAName = toHex(Buffer.from("TokenA", "utf8"))
   const tokenBName = toHex(Buffer.from("TokenB", "utf8"))
+
+  fs.writeFileSync("metadata.json", JSON.stringify({
+    policyId: policyId,
+    tokenAName: tokenAName,
+    tokenBName: tokenBName
+  }, null, 2))
 
   // Minting amounts
   const amountsToMint = new Map()
