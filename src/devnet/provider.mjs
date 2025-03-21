@@ -165,6 +165,22 @@ class ProviderBackend {
     return unspent
   }
 
+  async resolveUtxos(params) {
+    const utxos = params.txins.map(ref => {
+      const [ hash, index ] = ref.split("#")
+      const outputPath = this.indexPath + "/transactions/" + hash + "/outputs/" + index + "/output"
+      const outputData = JSON.parse(fs.readFileSync(outputPath))
+      return {
+        txHash: hash,
+        outputIndex: index,
+        assets: outputData.value,
+        address: outputData.address,
+        datum: outputData.datum
+      } 
+    })
+    return utxos
+  }
+
   async evaluateTx(params) {
     if (this.debug) {
       console.log("ProviderBackend::evaluateTx")

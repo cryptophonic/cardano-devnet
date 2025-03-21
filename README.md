@@ -160,7 +160,7 @@ View blocks, transactions, spent and unspent utxos, address and token data from 
 <img src="./docs/images/web_explorer_addr.png" width="600px"/>
 <img src="./docs/images/web_explorer_token.png" width="600px"/>
 
-### Javascript-based Blaze SDK query provider
+### Javascript Blaze SDK support
 
-We provide a javascript provider class that works with the [Blaze-Cardano](https://blaze.butane.dev/) project's SDK. Allows developers to send Cardano transactions directly from javascript.
+We provide a javascript provider class that works with the [Blaze-Cardano](https://blaze.butane.dev/) project's SDK. Allows developers to send Cardano transactions directly from javascript. The Blaze SDK is based on [Cardano JS SDK](https://input-output-hk.github.io/cardano-js-sdk/).
 

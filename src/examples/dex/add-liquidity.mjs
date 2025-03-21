@@ -21,7 +21,7 @@ import {
 } from '@blaze-cardano/core'
 
 import { BlazeProviderFrontend } from '../../blaze-frontend.mjs'
-import { randomWallet, aliasWallet } from '../../blaze-wallet.mjs'
+import { aliasWallet } from '../../blaze-wallet.mjs'
 
 const main = async () => {
   if (process.argv.length !== 5) {
@@ -51,7 +51,7 @@ const main = async () => {
   }, undefined)
   const paramPolicyId = PlutusData.newBytes(Buffer.from(metadata.policyId, "hex"))
   const paramTokenAName = PlutusData.newBytes(fromHex(metadata.tokenAName))
-  const paramTokenBName = PlutusData.newBytes(fromHex(metadata.tokenAName))
+  const paramTokenBName = PlutusData.newBytes(fromHex(metadata.tokenBName))
   const appliedScript = applyParams(HexBlob(rawCbor), paramPolicyId, paramTokenAName, paramPolicyId,
     paramTokenBName)
   
@@ -69,6 +69,7 @@ const main = async () => {
   }, null, 2))
 
   const fieldList = new PlutusList()
+  fieldList.add(PlutusData.newInteger(0n))
   const zeroCount = new ConstrPlutusData(0n, fieldList)
   const datum = PlutusData.newConstrPlutusData(zeroCount)
 
@@ -85,6 +86,7 @@ const main = async () => {
   const signedAddTx = await walletHandler.signTransaction(addTx)
   const addTxId = await walletHandler.provider.postTransactionToChain(signedAddTx)
   console.log("tx = " + addTxId)
+  await provider.awaitTransactionConfirmation(addTxId)
 
   process.exit()
 }

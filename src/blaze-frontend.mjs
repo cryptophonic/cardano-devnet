@@ -1,12 +1,13 @@
 import { WebSocket } from 'ws'
 
 import { Provider } from '@blaze-cardano/query'
-import { Core } from '@blaze-cardano/sdk'
 
 import { 
   PlutusLanguageVersion,
   Address,
   AssetId,
+  PolicyId,
+  AssetName,
   Datum,
   DatumHash,
   HexBlob,
@@ -16,7 +17,6 @@ import {
   TransactionOutput,
   TransactionUnspentOutput,
   Value,
-  toHex,
   ExUnits,
   Redeemers,
   RedeemerPurpose,
@@ -87,7 +87,7 @@ export class BlazeProviderFrontend extends Provider {
         lovelace = BigInt(quantity)
       } else {
         const parts = k.split(".")
-        tokenMap.set(AssetId(parts[0] + parts[1]), BigInt(quantity))
+        tokenMap.set(AssetId.fromParts(PolicyId(parts[0]), AssetName(parts[1])), BigInt(quantity))
       }
     })
     const txOut = new TransactionOutput(
@@ -284,10 +284,32 @@ export class BlazeProviderFrontend extends Provider {
     }
   }
 
-  resolveUnspentOutputs(txIns) {
-    if (this.debug) {
-      console.log("Frontend::resolveUnspentOutputs")
+  async resolveUnspentOutputs(txIns) {
+    const query = {
+      method: "resolveUtxos",
+      params: {
+        txins: txIns.map(txIn => {
+          return txIn.transactionId() + "#" + txIn.index()
+        })
+      }
     }
+    const obj = await this.query(query)
+    const utxos = obj.map(utxo => {
+    const assetList = Object.keys(utxo.assets).reduce((acc, policy) => {
+      if (policy === "ada") {
+        acc["lovelace"] = utxo.assets[policy]["lovelace"]
+      } else {
+          Object.keys(utxo.assets[policy]).map(name => {
+            const unit = policy + "." + name
+            acc[unit] = utxo.assets[policy][name]
+          })
+        }
+        return acc
+      }, {})
+      utxo.assets = assetList
+      return this.buildTransactionUnspentOutput(utxo)
+    })
+    return utxos
   }
 
   resolveDatum(datumHash) {

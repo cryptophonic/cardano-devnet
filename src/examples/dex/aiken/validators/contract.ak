@@ -11,8 +11,8 @@ validator dex(
   token_b_name: ByteArray,
 ) {
   spend(
-    _datum: Option<Void>,
-    _redeemer: Void,
+    _datum, 
+    _redeemer, 
     own_ref: OutputReference,
     tx: Transaction,
   ) {
@@ -36,6 +36,7 @@ validator dex(
     let swapBforA = tokenAout < tokenAin && tokenBout > tokenBin
     let validSwap = swapAforB || swapBforA
     let constantK = kOut >= kIn
+
     validSwap && constantK
   }
 

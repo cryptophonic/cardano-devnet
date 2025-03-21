@@ -69,6 +69,7 @@ const main = async () => {
   const signedMintingTx = await mintWalletHandler.signTransaction(mintingTx)
   const mintingTxId = await mintWalletHandler.provider.postTransactionToChain(signedMintingTx)
   console.log("Minting tx = " + mintingTxId)
+  await provider.awaitTransactionConfirmation(mintingTxId)
 
   process.exit()
 }
