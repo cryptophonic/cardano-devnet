@@ -1,0 +1,3 @@
+#!/usr/bin/env bash
+
+node $DEVNET_ROOT/src/devnet/provider.mjs $1

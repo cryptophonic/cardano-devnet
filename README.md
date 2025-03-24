@@ -160,8 +160,7 @@ View blocks, transactions, spent and unspent utxos, address and token data from 
 <img src="./docs/images/web_explorer_addr.png" width="600px"/>
 <img src="./docs/images/web_explorer_token.png" width="600px"/>
 
-### Lucid provider 
+### Javascript Blaze SDK support
 
-Lucid provider that connects the client-side lucid api to the node backend. This is a direct replacement for this lucid project's blockfrost provider when using the preprod or mainnet networks. Allows developers to send transactions directly from javascript. It has the advantage of recognizing mempool transactions when used with this project.
-
+We provide a javascript provider class that works with the [Blaze-Cardano](https://blaze.butane.dev/) project's SDK. Allows developers to send Cardano transactions directly from javascript. The Blaze SDK is based on [Cardano JS SDK](https://input-output-hk.github.io/cardano-js-sdk/).
 

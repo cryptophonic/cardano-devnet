@@ -1,6 +1,27 @@
-import { Data, Lucid, fromText, applyParamsToScript } from 'lucid-cardano'
-import { LucidProviderFrontend } from '../../lucid-frontend.mjs'
-import { loadPrivateKey } from '../../key-utils.mjs'
+import fs from 'fs'
+
+import {
+  Blaze,
+  applyParams
+} from '@blaze-cardano/sdk'
+import {
+  Value,
+  AssetId,
+  PolicyId,
+  AssetName,
+  NetworkId,
+  fromHex,
+  HexBlob,
+  PlutusV3Script,
+  PlutusData,
+  ConstrPlutusData,
+  PlutusList,
+  Datum,
+  addressFromValidator
+} from '@blaze-cardano/core'
+
+import { BlazeProviderFrontend } from '../../blaze-frontend.mjs'
+import { aliasWallet } from '../../blaze-wallet.mjs'
 
 const main = async () => {
   if (process.argv.length !== 5) {
@@ -8,56 +29,64 @@ const main = async () => {
     process.exit()
   }
 
-  const provider = new LucidProviderFrontend("ws://localhost:1338")
+  const provider = new BlazeProviderFrontend("ws://localhost:1338")
   await provider.init()
-  const lucid = await Lucid.new(provider, "Custom")
 
   const wallet_name = process.argv[2]
-  console.log("Using wallet: " + wallet_name)
-  lucid.selectWalletFromPrivateKey(loadPrivateKey(wallet_name))
+  const wallet = aliasWallet("owner", provider)
 
   const amount_token_a = BigInt(parseInt(process.argv[3], 10))
   const amount_token_b = BigInt(parseInt(process.argv[4], 10))
   console.log("Creating utxo with " + amount_token_a + " TokenA and " + amount_token_b + " TokenB")
 
-  // Get the trading token policyId 
-  const tradingScript = JSON.parse(fs.readFileSync("trading-token.script"))
-  const tradingMintingPolicy = lucid.utils.nativeScriptFromJson(tradingScript)
-  const tradingPolicyId = lucid.utils.mintingPolicyToId(tradingMintingPolicy)
-  console.log("trading policy: " + tradingPolicyId)
-  const tokenAName = fromText("TokenA")
-  const tokenBName = fromText("TokenB")
+  const metadata = JSON.parse(fs.readFileSync("metadata.json"))
 
   // Load the script and compute the script address from it
-  const script = JSON.parse(fs.readFileSync("aiken/plutus.json"))
-  const validator = {
-    type: "PlutusV2",
-    script: applyParamsToScript(script.validators[0].compiledCode, [
-      tradingPolicyId, tokenAName,
-      tradingPolicyId, tokenBName
-    ])
-  }
-  const scriptAddr = lucid.utils.validatorToAddress(validator)
-  console.log("Script address=" + scriptAddr)
+  const aikenPlutus = JSON.parse(fs.readFileSync("./aiken/plutus.json"))
+  const rawCbor = aikenPlutus.validators.reduce((acc, v) => {
+    if (v.title === "contract.dex.spend") {
+      acc = v.compiledCode
+    }
+    return acc
+  }, undefined)
+  const paramPolicyId = PlutusData.newBytes(Buffer.from(metadata.policyId, "hex"))
+  const paramTokenAName = PlutusData.newBytes(fromHex(metadata.tokenAName))
+  const paramTokenBName = PlutusData.newBytes(fromHex(metadata.tokenBName))
+  const appliedScript = applyParams(HexBlob(rawCbor), paramPolicyId, paramTokenAName, paramPolicyId,
+    paramTokenBName)
+  
+  // Compute the script address for these params
+  const script = new PlutusV3Script(appliedScript)
+  const scriptAddress = addressFromValidator(NetworkId.Testnet, script)
+  console.log("Script address = " + scriptAddress.toBech32())
 
-  try {
+  fs.writeFileSync("metadata.json", JSON.stringify({
+    policyId: metadata.policyId,
+    tokenAName: metadata.tokenAName,
+    tokenBName: metadata.tokenBName,
+    script: rawCbor,
+    scriptAddress: scriptAddress.toBech32()
+  }, null, 2))
 
-    const tx = await lucid.newTx()
-      .payToContract(scriptAddr, { inline: Data.void() }, {
-        [tradingPolicyId + tokenAName]: amount_token_a,
-        [tradingPolicyId + tokenBName]: amount_token_b
-      })
-      .complete()
-      .catch(e => {
-        console.log(e)
-      })
+  const fieldList = new PlutusList()
+  fieldList.add(PlutusData.newInteger(0n))
+  const zeroCount = new ConstrPlutusData(0n, fieldList)
+  const datum = PlutusData.newConstrPlutusData(zeroCount)
 
-    const signedTx = await tx.sign().complete()
-    const txHash = await signedTx.submit()
-
-  } catch (err) {
-    console.log("Caught error: " + err)
-  }
+  // Add liquidity transaction
+  const tokenMap = new Map()
+  tokenMap.set(AssetId.fromParts(PolicyId(metadata.policyId), AssetName(metadata.tokenAName)), amount_token_a)
+  tokenMap.set(AssetId.fromParts(PolicyId(metadata.policyId), AssetName(metadata.tokenBName)), amount_token_b)
+  const value = new Value(0n, tokenMap)
+  const walletHandler = await Blaze.from(provider, wallet)
+  const addTx = await walletHandler
+    .newTransaction()
+    .lockAssets(scriptAddress, value, Datum.newInlineData(datum))
+    .complete()
+  const signedAddTx = await walletHandler.signTransaction(addTx)
+  const addTxId = await walletHandler.provider.postTransactionToChain(signedAddTx)
+  console.log("tx = " + addTxId)
+  await provider.awaitTransactionConfirmation(addTxId)
 
   process.exit()
 }

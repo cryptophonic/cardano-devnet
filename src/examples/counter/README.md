@@ -1,44 +1,37 @@
-# How to run the State Counter example
+# Counter script
 
-## Step 1 - Compile the aiken smart contract
+This directory contains a smart contract example for a "counter" script. The script has an integer value stored in the datum of the latest UTxO. The script succeeds if the UTxO is spent by a transaction that creates an output UTxO to the same address with a datum containing the integer plus one. To track state it uses an NFT token that is stored in the latest UTxO and be spent into the subsequent UTxO.
 
-This example requires [aiken](https://aiken-lang.org/installation-instructions) >= v1.0.28 and it assumes that
-CARDANO_CLI_GURU has been coupled to cardano-devnet as described in the install instructions.
+1. Compile the aiken smart contract
 
 ```
-$ cd aiken
-$ aiken build
-$ cd ..
+$ cd aiken; aiken build; cd ..
 ```
 
 This should create a "plutus.json" file in the aiken directory. This contains the smart contract bytecode.
 
-## Step 2 - Ensure the devnet is running
+2. Ensure the devnet is running
 
 In a separate window:
 
 ```
-$ start-cardano-devnet -mie 5
+$ start-cardano-devnet -miep 5
 ```
 
-The -m (monitor) needs to be running because it contains the Lucid backend provider that gives visibility into the
-mempool and pending tx's.
-
-## Step 3 - Run the setup
+3. Seed the state with a datum with a count of 0. This involves minting the state NFT first, then creating the locked funds.
 
 ```
-$ ./setup.sh
+$ node seed-state.mjs
 ```
 
-You'll be able to observe transactions go into the mempool and become confirmed in the monitor window.
-
-## Step 4 - Increment the contract state
+4. Increment the contract state using any wallet you choose:
 
 ```
-$ node increment.mjs alice
+$ fund alice 100
+$ node increment-state.mjs alice
 ```
 
-If you look at the output utxo you can observe that the CBOR datum shows the counter has been incremented.
+If you look at the output utxo you can observe that the CBOR datum shows the counter has been incremented. The datum's hex CBOR value is of the form "d8799fXXff" where XX is the current count stored in the UTxO.
 
 
 

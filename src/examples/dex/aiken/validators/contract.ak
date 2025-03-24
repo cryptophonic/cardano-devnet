@@ -1,22 +1,26 @@
-use aiken/transaction.{ScriptContext, Spend, find_input, find_script_outputs}
-use aiken/transaction/credential.{ScriptCredential}
-use aiken/transaction/value.{quantity_of}
+use aiken/collection/list
+use cardano/address.{Script}
+use cardano/assets.{quantity_of}
+use cardano/transaction.{OutputReference, Transaction, find_script_outputs}
 
-validator(
+validator dex(
   // parameterized by (DEX token A, DEX token B)
   token_a_policy: ByteArray,
   token_a_name: ByteArray,
   token_b_policy: ByteArray,
   token_b_name: ByteArray,
 ) {
-  fn swap(_datum: Void, _redeemer: Void, ctx: ScriptContext) -> Bool {
+  spend(
+    _datum, 
+    _redeemer, 
+    own_ref: OutputReference,
+    tx: Transaction,
+  ) {
     // Grab our spending input and output to this script hash
-    expect Spend(output_reference) = ctx.purpose
     expect Some(own_input) =
-      ctx.transaction.inputs |> find_input(output_reference)
-    expect ScriptCredential(own_hash) =
-      own_input.output.address.payment_credential
-    expect [own_output] = find_script_outputs(ctx.transaction.outputs, own_hash)
+      list.find(tx.inputs, fn(input) { input.output_reference == own_ref })
+    expect Script(own_hash) = own_input.output.address.payment_credential
+    expect [own_output] = find_script_outputs(tx.outputs, own_hash)
 
     // Check swap amounts, and swap happens with non-decreasing K 
     // (rounding error can cause K to slightly increase with each swap)
@@ -32,6 +36,11 @@ validator(
     let swapBforA = tokenAout < tokenAin && tokenBout > tokenBin
     let validSwap = swapAforB || swapBforA
     let constantK = kOut >= kIn
+
     validSwap && constantK
+  }
+
+  else(_) {
+    fail
   }
 }

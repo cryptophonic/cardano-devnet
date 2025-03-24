@@ -12,10 +12,7 @@ fund alice 100
 fund bob 100
 
 node mint-trading-tokens.mjs owner 10000 2500
-sleep 1
 node mint-trading-tokens.mjs alice 1000 1000
-sleep 1
 node mint-trading-tokens.mjs bob 100 100
-sleep 1
 
 node add-liquidity.mjs owner 10000 2500

@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 
-while getopts "mie" opt; do
+while getopts "miep" opt; do
     case $opt in
         m)
             START_MONITOR=true
@@ -11,30 +11,25 @@ while getopts "mie" opt; do
         e)
             START_EXPLORER=true
             ;;
+        p)
+            START_PROVIDER=true
+            ;;
         \?)
-            echo "Invalid option -$OPTARG"
-            print_help
-            exit 1
+            OPTSERR=true
             ;;
     esac
 done
 
 shift $((OPTIND-1))
 
-if [[ ! $1 == ?(-)+([0-9]) ]]; then
+if [ -n "$OPTSERR" ] || [[ ! $1 == ?(-)+([0-9]) ]]; then
   SCRIPTNAME=$(basename $0)
-  echo "usage: $SCRIPTNAME [-m] [-i] [-e] <block time>"
+  echo "usage: $SCRIPTNAME [-m] [-i] [-e] [-p] <block time>"
   echo "  -m  run terminal monitor"
   echo "  -i  run indexer"
   echo "  -e  run explorer"
+  echo "  -p  run provider backend"
   exit -1
-fi
-
-if [ ! $(type -P "cardano-node" ) ]; then
-  echo "cardano-node not in path, configuring for docker"
-  DOCKER=true
-else
-  echo "found cardano-node in path"
 fi
 
 RUNTIMEDIR=$DEVNET_ROOT/runtime
@@ -45,14 +40,7 @@ CARDANO_CLI_RUNTIMEDIR="$RUNTIMEDIR"
 CARDANO_CLI_KEYS_PATH="$CARDANO_ASSETS_PATH/keys"
 echo "CARDANO_CLI_KEYS_PATH=$CARDANO_CLI_KEYS_PATH"
 
-if [ ! $(type -P "ogmios" ) ]; then
-  echo "ogmios not in path, configuring for docker"
-  DOCKER=true
-else
-  echo "found ogmios in path"
-fi
-
-if [ "$DOCKER" == "true" ] && [ ! $(type -P "docker" ) ]; then
+if [ ! $(type -P "docker" ) ]; then
   echo "docker not in path, please install either cardano-node and ogmios, or docker"
   exit -1
 fi
@@ -70,49 +58,14 @@ $DEVNET_ROOT/scripts/setup-devnet $1
 mkfifo $RUNTIMEDIR/tx.draft
 mkfifo $RUNTIMEDIR/tx.signed
 
-if [ "$DOCKER" == "true" ]; then
+docker compose up cardano-node ogmios --detach
 
-  docker compose up cardano-node ogmios --detach
-
+if [ -n "$START_MONITOR" ]; then
+  STDOUT_INDEXER=/dev/null
+elif [ -n "$START_INDEXER" ]; then
+  STDOUT_INDEXER=/dev/stdout
 else
-
-  if pgrep -x "cardano-node" > /dev/null
-  then
-    echo "Stopping cardano-node"
-    pkill cardano-node
-  fi
-
-  if pgrep -x "ogmios" > /dev/null
-  then
-    echo "Stopping ogmios"
-    pkill ogmios
-  fi
-
-  echo cardano-node run \
-    --config $TARGETDIR/cardano-node.json \
-    --topology $TARGETDIR/topology.json \
-    --database-path $RUNTIMEDIR/db \
-    --socket-path $CARDANO_NODE_SOCKET_PATH \
-    --shelley-operational-certificate $TARGETDIR/opcert.cert \
-    --shelley-kes-key $TARGETDIR/kes.skey \
-    --shelley-vrf-key $TARGETDIR/vrf.skey
-  cardano-node run \
-    --config $TARGETDIR/cardano-node.json \
-    --topology $TARGETDIR/topology.json \
-    --database-path $RUNTIMEDIR/db \
-    --socket-path $CARDANO_NODE_SOCKET_PATH \
-    --shelley-operational-certificate $TARGETDIR/opcert.cert \
-    --shelley-kes-key $TARGETDIR/kes.skey \
-    --shelley-vrf-key $TARGETDIR/vrf.skey > /dev/null 2>&1 &
-  CARDANO_NODE_PID=$!
-
-  # ogmios >6.0.0 required (assumed to be in path)
-  echo ogmios --node-socket $CARDANO_NODE_SOCKET_PATH \
-         --node-config $TARGETDIR/cardano-node.json
-  ogmios --node-socket $CARDANO_NODE_SOCKET_PATH \
-         --node-config $TARGETDIR/cardano-node.json > /dev/null 2>&1 &
-  OGMIOS_PID=$!
-
+  STDOUT_CARDANO_NODE=true
 fi
 
 # transfer from faucet -> faucet to put an indexed tx on-chain (genesis tx's are not indexed)
@@ -148,44 +101,27 @@ $CARDANO_CLI conway transaction build \
 
 if [ -n "$START_INDEXER" ]; then
   echo "Starting indexer"
-  if [ -n "$START_MONITOR" ]; then
-    node $DEVNET_ROOT/src/devnet/indexer.mjs > /dev/null 2>&1 &
-  else 
-    # If we're not starting the monitor then put indexer in foreground
-    node $DEVNET_ROOT/src/devnet/indexer.mjs
-  fi
-  INDEXER_PID=$!
+  node $DEVNET_ROOT/src/devnet/indexer.mjs > $STDOUT_INDEXER 2>&1 &
 fi
 
 if [ -n "$START_EXPLORER" ]; then
   echo "Starting explorer"
   (cd $DEVNET_ROOT/explorer && npm run dev > /dev/null 2>&1) &
-  EXPLORER_PID=$!
+fi
+
+if [ -n "$START_PROVIDER" ]; then
+  echo "Starting provider"
+  node $DEVNET_ROOT/src/devnet/provider.mjs > /dev/null 2>&1 &
 fi
 
 function clean_up {
   echo
   echo "Trapped exit; cleaning up"
 
-  if [ -n "$START_INDEXER" ]; then
-    echo "Killing indexer pid: $INDEXER_PID"
-    kill $INDEXER_PID
-  fi
-  if [ -n "$START_EXPLORER" ]; then
-    echo "Killing explorer pid: $EXPLORER_PID"
-    kill $EXPLORER_PID
-  fi
+  docker compose down
 
-  if [ "$DOCKER" == "true" ]; then
-    docker compose down
-  else
-    echo "Killing cardano-node pid: $CARDANO_NODE_PID"
-    kill $CARDANO_NODE_PID
-    echo "Killing ogmios pid: $OGMIOS_PID"
-    kill $OGMIOS_PID
-  fi
-
-  kill -term $$
+  THIS_PGID=$(ps --no-headers -o pgid:1 $$)
+  kill -term "-$THIS_PGID"
 }
 
 trap clean_up EXIT
@@ -193,6 +129,8 @@ trap clean_up EXIT
 if [ -n "$START_MONITOR" ]; then
   echo "Starting monitor"
   monitor
+elif [ -n "$STDOUT_CARDANO_NODE" ]; then
+  docker logs -f devnet-cardano-node
 else
   sleep infinity
 fi

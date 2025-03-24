@@ -1,6 +1,6 @@
 import fs from 'fs'
 import path from 'path'
-import { OgmiosConnection, OgmiosStateMachine } from './components/Ogmios.mjs'
+import { OgmiosStateMachine } from './components/Ogmios.mjs'
 
 const DB_ROOT=process.env.DEVNET_ROOT + "/runtime/index"
 const OGMIOS_PORT = 1337
@@ -189,7 +189,6 @@ class DBWriter {
     fs.mkdirSync(this.db + "/transactions/" + tx.id)
     fs.mkdirSync(this.db + "/transactions/" + tx.id + "/inputs")
     fs.mkdirSync(this.db + "/transactions/" + tx.id + "/outputs")
-    fs.writeFileSync(this.db + "/transactions/" + tx.id + "/tx", formattedTransaction)
     relative_link(this.db + "/blocks/" + block.id + "/block", this.db + "/transactions/" + tx.id + "/block")
     let redeemers = {}
     if (tx.redeemers !== undefined) {
@@ -280,6 +279,8 @@ class DBWriter {
     }
     fs.writeFileSync(this.db + "/pages/transactions/" + page, JSON.stringify(pageObj, null, 2))
     fs.writeFileSync(this.db + "/pages/transactions/last", JSON.stringify(page))
+    // Do this last because the provider waits for this file to eliminate race conditions
+    fs.writeFileSync(this.db + "/transactions/" + tx.id + "/tx", formattedTransaction)
   }
 
   produce(utxo) {
@@ -348,8 +349,6 @@ class DBWriter {
 }
 
 const writer = new DBWriter(DB_ROOT, new DBTransformer())
-const osm = new OgmiosStateMachine(writer)
-new OgmiosConnection(OGMIOS_PORT, osm)
-
-osm.addCallback(writer.writeBlock.bind(writer))
+const osm = new OgmiosStateMachine(OGMIOS_PORT)
+osm.on('block', writer.writeBlock.bind(writer))
 
