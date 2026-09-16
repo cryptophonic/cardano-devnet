@@ -15,6 +15,13 @@ if [[ ! $1 == ?(-)+([0-9]) ]]; then
     exit -1
 fi
 
+# In-place sed: GNU takes no argument to -i, BSD (macOS) requires an empty one
+if sed --version >/dev/null 2>&1; then
+  sedi() { sed -i "$@"; }
+else
+  sedi() { sed -i '' "$@"; }
+fi
+
 BASEDIR="$DEVNET_ROOT"
 RUNTIMEDIR="$BASEDIR/runtime"
 TARGETDIR="$RUNTIMEDIR/chain"
@@ -40,13 +47,13 @@ echo -n faucet > $CARDANO_CLI_GURU/assets/alias/$faucet_addr.alias
 
 # Update start time params
 echo '{"Producers": []}' > "$TARGETDIR/topology.json"
-sed -i "s/\"startTime\": [0-9]*/\"startTime\": $(date +%s)/" "$TARGETDIR/genesis-byron.json" && \
-sed -i "s/\"systemStart\": \".*\"/\"systemStart\": \"$(date -u +%FT%TZ)\"/" "$TARGETDIR/genesis-shelley.json"
+sedi "s/\"startTime\": [0-9]*/\"startTime\": $(date +%s)/" "$TARGETDIR/genesis-byron.json" && \
+sedi "s/\"systemStart\": \".*\"/\"systemStart\": \"$(date -u +%FT%TZ)\"/" "$TARGETDIR/genesis-shelley.json"
 
 # Calculate activeSlotsCoeff from slot time parameter and add to genesis file
 COEFF=$(jq -n 1/$1)
 echo "Setting slot time to $1: coeffecient=$COEFF"
-sed -i "s/\"activeSlotsCoeff\": .*/\"activeSlotsCoeff\": $COEFF,/" "$TARGETDIR/genesis-shelley.json"
+sedi "s/\"activeSlotsCoeff\": .*/\"activeSlotsCoeff\": $COEFF,/" "$TARGETDIR/genesis-shelley.json"
 
 # Recalculate genesis hashes
 echo "#"
@@ -55,19 +62,19 @@ echo "#"
 echo $CARDANO_CLI byron genesis print-genesis-hash --genesis-json $CARDANO_CLI_TARGETDIR/genesis-byron.json
 BYRON_HASH=$($CARDANO_CLI byron genesis print-genesis-hash --genesis-json $CARDANO_CLI_TARGETDIR/genesis-byron.json)
 echo "Computed Byron hash: $BYRON_HASH"
-sed -i "s/\"ByronGenesisHash\": .*/\"ByronGenesisHash\": \"$BYRON_HASH\",/" "$TARGETDIR/cardano-node.json"
+sedi "s/\"ByronGenesisHash\": .*/\"ByronGenesisHash\": \"$BYRON_HASH\",/" "$TARGETDIR/cardano-node.json"
 echo $CARDANO_CLI legacy genesis hash --genesis $CARDANO_CLI_TARGETDIR/genesis-shelley.json
 SHELLEY_HASH=$($CARDANO_CLI legacy genesis hash --genesis $CARDANO_CLI_TARGETDIR/genesis-shelley.json)
 echo "Computed Shelley hash: $SHELLEY_HASH"
-sed -i "s/\"ShelleyGenesisHash\": .*/\"ShelleyGenesisHash\": \"$SHELLEY_HASH\",/" "$TARGETDIR/cardano-node.json"
+sedi "s/\"ShelleyGenesisHash\": .*/\"ShelleyGenesisHash\": \"$SHELLEY_HASH\",/" "$TARGETDIR/cardano-node.json"
 echo $CARDANO_CLI legacy genesis hash --genesis $CARDANO_CLI_TARGETDIR/genesis-alonzo.json
 ALONZO_HASH=$($CARDANO_CLI legacy genesis hash --genesis $CARDANO_CLI_TARGETDIR/genesis-alonzo.json)
 echo "Computed Alonzo hash: $ALONZO_HASH"
-sed -i "s/\"AlonzoGenesisHash\": .*/\"AlonzoGenesisHash\": \"$ALONZO_HASH\",/" "$TARGETDIR/cardano-node.json"
+sedi "s/\"AlonzoGenesisHash\": .*/\"AlonzoGenesisHash\": \"$ALONZO_HASH\",/" "$TARGETDIR/cardano-node.json"
 echo $CARDANO_CLI conway genesis hash --genesis $CARDANO_CLI_TARGETDIR/genesis-conway.json
 CONWAY_HASH=$($CARDANO_CLI conway genesis hash --genesis $CARDANO_CLI_TARGETDIR/genesis-conway.json)
 echo "Computed Conway hash: $CONWAY_HASH"
-sed -i "s/\"ConwayGenesisHash\": .*/\"ConwayGenesisHash\": \"$CONWAY_HASH\",/" "$TARGETDIR/cardano-node.json"
+sedi "s/\"ConwayGenesisHash\": .*/\"ConwayGenesisHash\": \"$CONWAY_HASH\",/" "$TARGETDIR/cardano-node.json"
 
 find $TARGETDIR -type f -exec chmod 0400 {} \;
 echo "Prepared devnet"

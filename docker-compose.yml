@@ -19,6 +19,8 @@ services:
 
   cardano-cli:
     image: cardanosolutions/cardano-node-ogmios:v6.10.0_10.1.3
+    # amd64-only image; on arm64 hosts (Apple Silicon) this runs under emulation
+    platform: linux/amd64
     user: $MY_UID:$MY_GID
     entrypoint: /usr/local/bin/cardano-cli
     volumes:
@@ -32,6 +34,8 @@ services:
 
   cardano-node:
     image: cardanosolutions/cardano-node-ogmios:v6.10.0_10.1.3
+    # amd64-only image; on arm64 hosts (Apple Silicon) this runs under emulation
+    platform: linux/amd64
     container_name: devnet-cardano-node
     user: $MY_UID:$MY_GID
     entrypoint: /usr/local/bin/cardano-node
@@ -60,6 +64,8 @@ services:
 
   ogmios:
     image: cardanosolutions/cardano-node-ogmios:v6.10.0_10.1.3
+    # amd64-only image; on arm64 hosts (Apple Silicon) this runs under emulation
+    platform: linux/amd64
     container_name: devnet-ogmios
     user: $MY_UID:$MY_GID
     entrypoint: /bin/ogmios

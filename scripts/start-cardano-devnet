@@ -120,11 +120,16 @@ function clean_up {
 
   docker compose down
 
-  THIS_PGID=$(ps --no-headers -o pgid:1 $$)
+  # BSD (macOS) ps has no --no-headers; "-o pgid=" suppresses the header on both
+  THIS_PGID=$(ps -o pgid= -p $$ | tr -d '[:space:]')
   kill -term "-$THIS_PGID"
 }
 
 trap clean_up EXIT
+# Without these, a SIGINT/SIGTERM sent to this script alone (rather than to the whole
+# process group, as a terminal Ctrl-C does) is deferred until the foreground child
+# below returns, and cleanup never runs.
+trap 'exit 0' INT TERM
 
 if [ -n "$START_MONITOR" ]; then
   echo "Starting monitor"
@@ -132,5 +137,7 @@ if [ -n "$START_MONITOR" ]; then
 elif [ -n "$STDOUT_CARDANO_NODE" ]; then
   docker logs -f devnet-cardano-node
 else
-  sleep infinity
+  # BSD (macOS) sleep doesn't accept "infinity". Backgrounding the sleep and waiting on
+  # it keeps the shell interruptible, so the traps above fire promptly.
+  while :; do sleep 86400 & wait $!; done
 fi
