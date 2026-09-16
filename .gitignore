@@ -3,3 +3,7 @@ runtime
 node_modules
 package-lock.json
 cardano-devnet.log
+
+# Locally-built cardano-node binary, baked into the published image instead
+bin
+
