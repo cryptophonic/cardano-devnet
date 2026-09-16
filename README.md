@@ -8,14 +8,33 @@ This repository enables anyone to create a completely local cardano development 
 
 1. This project uses maintained docker containers to run the various components (cardano-node, ogmios) automatically.  Install [docker](https://docs.docker.com/engine/install/) and ensure it works for the user you want to run the devnet as (avoid running docker as root). Make sure you have the latest version with the "docker compose" command.
 
-2. Clone the repo and allow direnv ([direnv](https://direnv.net/) must be installed on your system).
+2. Authenticate to the GitHub Container Registry (ghcr.io). The devnet runs a custom `cardano-node`/`cardano-cli`/`ogmios` image published at `ghcr.io/cryptophonic/cardano-node-ogmios`, and docker must be logged in to ghcr.io to pull it.
+
+   First, create a [GitHub personal access token (classic)](https://github.com/settings/tokens/new?scopes=read:packages&description=cardano-devnet) with the **read:packages** scope. Fine-grained tokens also work, provided they grant *Packages: read-only*.
+
+   Then log docker in, reading the token from a file or environment variable so it doesn't end up in your shell history:
+
+```
+$ echo $GHCR_TOKEN | docker login ghcr.io -u <your-github-username> --password-stdin
+> Login Succeeded
+```
+
+   The credentials are stored by docker (in `~/.docker/config.json` unless you use a credential helper), so this is a one-time step per machine. Verify the pull works before continuing:
+
+```
+$ docker pull ghcr.io/cryptophonic/cardano-node-ogmios:v7.0.0_11.1.1-custom
+```
+
+   If you see `denied` or `unauthorized`, the token is missing the read:packages scope or hasn't been authorized for the organization. To use a different image, override it by setting `DEVNET_IMAGE` in your environment — docker-compose falls back to the ghcr.io image above when it isn't set.
+
+3. Clone the repo and allow direnv ([direnv](https://direnv.net/) must be installed on your system).
 
 ```
 $ git clone https://github.com/Dracula-DAO/cardano-devnet
 $ cd cardano-devnet
 ```
 
-3. Install dependencies
+4. Install dependencies
 
 ```
 $ git submodule update --init --recursive
@@ -24,7 +43,7 @@ $ npm install
 $ cd explorer; npm install; cd -
 ```
 
-The commands in *step 3* are automated in the *install.sh* script in the home directory.
+The commands in *step 4* are automated in the *install.sh* script in the home directory.
 
 ## Quick start
 
