@@ -19,7 +19,7 @@
 # NODE_VARIANT=default swaps the custom node back out for the stock upstream
 # one, should you ever need to compare against it.
 
-ARG CARDANO_NODE_VERSION=11.1.1
+ARG CARDANO_NODE_VERSION=11.1.1   # base image (stock cli); custom node in bin/ is 11.1.2
 ARG OGMIOS_VERSION=7.0.0
 ARG NODE_VARIANT=custom
 

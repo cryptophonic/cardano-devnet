@@ -18,7 +18,7 @@ services:
       #- ${CARDANO_ASSETS_PATH}:/assets
 
   cardano-cli:
-    image: ${DEVNET_IMAGE:-ghcr.io/cryptophonic/cardano-node-ogmios:v7.0.0_11.1.1-custom}
+    image: ${DEVNET_IMAGE:-ghcr.io/cryptophonic/cardano-node-ogmios:v7.0.0_11.1.2-custom}
     # x86-64 image (custom cardano-node build); on arm64 hosts this runs under emulation
     platform: linux/amd64
     user: $MY_UID:$MY_GID
@@ -33,7 +33,7 @@ services:
       - CARDANO_NODE_NETWORK_ID=42
 
   cardano-node:
-    image: ${DEVNET_IMAGE:-ghcr.io/cryptophonic/cardano-node-ogmios:v7.0.0_11.1.1-custom}
+    image: ${DEVNET_IMAGE:-ghcr.io/cryptophonic/cardano-node-ogmios:v7.0.0_11.1.2-custom}
     # x86-64 image (custom cardano-node build); on arm64 hosts this runs under emulation
     platform: linux/amd64
     container_name: devnet-cardano-node
@@ -63,7 +63,7 @@ services:
     restart: on-failure
 
   ogmios:
-    image: ${DEVNET_IMAGE:-ghcr.io/cryptophonic/cardano-node-ogmios:v7.0.0_11.1.1-custom}
+    image: ${DEVNET_IMAGE:-ghcr.io/cryptophonic/cardano-node-ogmios:v7.0.0_11.1.2-custom}
     # x86-64 image (custom cardano-node build); on arm64 hosts this runs under emulation
     platform: linux/amd64
     container_name: devnet-ogmios
