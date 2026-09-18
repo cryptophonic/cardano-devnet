@@ -1,0 +1,126 @@
+#!/bin/bash
+
+# Build a numbered run directory for an isolated fork-mode node:
+#   - reflink clone of the golden DB (copy-on-write; the golden DB is read only)
+#   - genesis + config from the golden config dir, with the isolated overrides
+#   - topology that can neither dial nor be dialled
+#   - KES/VRF keys plus a freshly issued opcert at the CURRENT KES period
+#   - optionally a fork.env with the fork gates
+#
+# Usage:
+#   new-isolated-run <N>                       # gates unset (phase 1 style)
+#   new-isolated-run <N> <fork slot> <block every>   # gates set
+#
+# Then: isolated-node start <RUNS>/run-<N>
+
+set -euo pipefail
+
+GOLDEN=${GOLDEN_DB:-/mnt/cardano/preview}
+RUNS=${RUNS_DIR:-/mnt/cardano/runs}
+CLI=${CARDANO_CLI_BIN:-/mnt/cardano/bin/node-11.1.2/bin/cardano-cli}
+
+N=${1:?usage: new-isolated-run <N> [fork-slot block-every]}
+RUN=$RUNS/run-$N
+[ -e "$RUN" ] && { echo "refusing: $RUN already exists (run dirs are never reused)" >&2; exit 1; }
+
+mkdir -p "$RUN/chain" "$RUN/ipc"
+
+# copy-on-write clone; fails loudly rather than falling back to a full copy
+cp -a --reflink=always "$GOLDEN/db" "$RUN/db"
+
+cp -a "$GOLDEN"/config/*.json "$RUN/chain/"
+cp -a "$GOLDEN"/pool/kes.skey "$GOLDEN"/pool/vrf.skey "$RUN/chain/"
+
+# Each run starts from the same golden ledger state, where the pool's opcert
+# counter is 0. The OCERT rule only accepts a cert whose issue number is within
+# +1 of that, so every run must issue number 0 -- hence a per-run counter file
+# rather than the golden one, which would creep up and cause
+# CounterOverIncrementedOCERT once it passed 1.
+$CLI latest node new-counter \
+  --cold-verification-key-file "$GOLDEN/pool/cold.vkey" \
+  --counter-value 0 \
+  --operational-certificate-issue-counter-file "$RUN/chain/opcert.counter"
+
+# opcert at the current KES period (fork-mode rule)
+KES=$(python3 -c "
+import datetime, json
+g = json.load(open('$RUN/chain/shelley-genesis.json'))
+s = datetime.datetime.strptime(g['systemStart'], '%Y-%m-%dT%H:%M:%SZ').replace(tzinfo=datetime.timezone.utc)
+now = datetime.datetime.now(datetime.timezone.utc)
+print(int((now - s).total_seconds()) // g['slotsPerKESPeriod'])")
+$CLI latest node issue-op-cert \
+  --kes-verification-key-file "$GOLDEN/pool/kes.vkey" \
+  --cold-signing-key-file "$GOLDEN/pool/cold.skey" \
+  --operational-certificate-issue-counter "$RUN/chain/opcert.counter" \
+  --kes-period "$KES" \
+  --out-file "$RUN/chain/node.opcert"
+
+# isolated config + topology
+python3 - "$RUN" <<'PY'
+import json, sys
+run = sys.argv[1]
+c = json.load(open(f'{run}/chain/config.json'))
+c.update({
+    "EnableP2P": True,
+    "PeerSharing": False,
+    # Genesis/LoE off: the node selects its own chain with no peers
+    "ConsensusMode": "PraosMode",
+    "TargetNumberOfRootPeers": 0,
+    "TargetNumberOfKnownPeers": 0,
+    "TargetNumberOfEstablishedPeers": 0,
+    "TargetNumberOfActivePeers": 0,
+    "TargetNumberOfKnownBigLedgerPeers": 0,
+    "TargetNumberOfEstablishedBigLedgerPeers": 0,
+    "TargetNumberOfActiveBigLedgerPeers": 0,
+})
+t = c.setdefault("TraceOptions", {})
+# Steady state should be nothing but "Chain extended" (a Notice). The stock
+# preview config turns a dozen tracers up to Info; drop those back to the root
+# severity so only Notice and above survive. Costs the startup/replay progress
+# lines too, which is the intended trade.
+for opts in t.values():
+    if isinstance(opts, dict) and opts.get("severity") == "Info":
+        opts["severity"] = "Notice"
+# local client connects (cardano-cli query tip) are expected here and would
+# otherwise log a CleanExit pair per probe
+t["Net.Mux.Local"] = {"severity": "Warning"}
+# the parent namespace does not cover these: each local client connect emits
+# Bearer/Channel traces at Info regardless, and a tx-building session opens
+# dozens of short-lived connections
+t["Net.Mux.Local.Bearer"] = {"severity": "Silence"}
+t["Net.Mux.Local.Channel"] = {"severity": "Silence"}
+# the per-slot leader-check chatter: one pair of lines every second. The
+# interesting outcomes (NodeIsLeader, ForgedBlock, AdoptedBlock) stay at Info.
+t["Forge.Loop.StartLeadershipCheck"] = {"severity": "Silence"}
+t["Forge.Loop.NodeNotLeader"] = {"severity": "Silence"}
+# the KES countdown, also once per slot. KES expiry is visible from the opcert
+# and the run is short-lived, so nothing is lost by silencing it.
+t["Forge.StateInfo"] = {"severity": "Silence"}
+# Why a tx was rejected. cardano-cli cannot decode ForkModeExtraneousWitness
+# (a new ConwayUtxowPredFailure constructor, CBOR key 19) and reports it as a
+# DeserialiseFailure instead, so the node trace is the only legible source.
+# DMaximum is what puts err.reason in the line.
+t["Mempool.RejectedTx"] = {"severity": "Info", "detail": "DMaximum"}
+json.dump(c, open(f'{run}/chain/config.json', 'w'), indent=2)
+
+# bootstrapPeers must be null, not []: an empty list means "bootstrap mode with
+# zero trustable peers", which 11.1.2 rejects outright
+json.dump({"bootstrapPeers": None, "localRoots": [], "publicRoots": [],
+           "useLedgerAfterSlot": -1},
+          open(f'{run}/chain/topology.json', 'w'), indent=2)
+PY
+
+if [ $# -ge 3 ]; then
+  cat > "$RUN/chain/fork.env" <<EOF
+CARDANO_FORK_SLOT=$2
+CARDANO_FORK_GOD_KEY=$($CLI latest address key-hash --payment-verification-key-file "$GOLDEN/god/god.vkey")
+CARDANO_FORK_POOL_ID=$($CLI latest stake-pool id --cold-verification-key-file "$GOLDEN/pool/cold.vkey" --output-format hex)
+CARDANO_FORK_BLOCK_EVERY=$3
+EOF
+  echo "fork gates:"; sed 's/^/  /' "$RUN/chain/fork.env"
+else
+  echo "fork gates: none (unset)"
+fi
+
+echo "opcert issued at KES period $KES"
+echo "run dir ready: $RUN"

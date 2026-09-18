@@ -67,6 +67,46 @@ services:
       - 12798:12798
     restart: on-failure
 
+  # Isolated fork-mode node: no network namespace at all, so it can neither
+  # reach nor be reached by any other node. The Unix socket in /ipc is the only
+  # way in or out; clients (cardano-cli, indexer) mount the same directory.
+  # Gated behind the "isolated" profile so ordinary compose commands ignore it.
+  # Started via scripts/isolated-node, which sets ISOLATED_RUN_DIR to a run
+  # directory containing chain/, db/ and ipc/.
+  cardano-node-isolated:
+    profiles: ["isolated"]
+    image: ${DEVNET_IMAGE:-ghcr.io/cryptophonic/cardano-node-ogmios:v7.0.0_11.1.2-custom-cb30ce58}
+    # x86-64 image (custom cardano-node build); on arm64 hosts this runs under emulation
+    platform: linux/amd64
+    container_name: devnet-node-isolated
+    user: $MY_UID:$MY_GID
+    entrypoint: /usr/local/bin/cardano-node
+    network_mode: none
+    # Fork gates come from an env file, defaulting to an empty one so a plain
+    # run has them unset (that inertness is what phase 1 proves).
+    # scripts/isolated-node points ISOLATED_ENV_FILE at <run dir>/chain/fork.env
+    # when that file exists.
+    env_file: ${ISOLATED_ENV_FILE:-/dev/null}
+    # the image healthcheck probes ogmios, which is not running here
+    healthcheck:
+      test: ["CMD-SHELL", "test -S /ipc/node.socket"]
+      interval: 30s
+    command: [
+      "run",
+      "--config", "/rundir/chain/config.json",
+      "--topology", "/rundir/chain/topology.json",
+      "--database-path", "/rundir/db",
+      "--socket-path", "/ipc/node.socket",
+      "--host-addr", "127.0.0.1",
+      "--port", "3001",
+      "--shelley-kes-key", "/rundir/chain/kes.skey",
+      "--shelley-vrf-key", "/rundir/chain/vrf.skey",
+      "--shelley-operational-certificate", "/rundir/chain/node.opcert"
+    ]
+    volumes:
+      - ${ISOLATED_RUN_DIR:-/var/empty}:/rundir
+      - ${ISOLATED_RUN_DIR:-/var/empty}/ipc:/ipc
+
   ogmios:
     image: ${DEVNET_IMAGE:-ghcr.io/cryptophonic/cardano-node-ogmios:v7.0.0_11.1.2-custom-cb30ce58}
     # x86-64 image (custom cardano-node build); on arm64 hosts this runs under emulation

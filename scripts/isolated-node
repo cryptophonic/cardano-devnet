@@ -1,0 +1,85 @@
+#!/bin/bash
+
+# Start (or stop) the patched cardano-node in an isolated container: no network
+# namespace, no fork env vars, producer keys loaded. The node can neither reach
+# nor be reached by any other node; the Unix socket in <run dir>/ipc is the only
+# way in or out.
+#
+# Usage:
+#   isolated-node start <run dir>    # run dir must contain chain/ db/ ipc/
+#   isolated-node stop
+#   isolated-node logs [-f]
+#   isolated-node cli <cardano-cli args...>   # cli against the isolated socket
+#
+# The run directory is a copy of the golden DB plus an isolated config; never
+# point this at the golden DB itself.
+
+set -euo pipefail
+
+DEVNET_ROOT=${DEVNET_ROOT:-$(git -C "$(dirname "$0")" rev-parse --show-toplevel)}
+COMPOSE="docker compose -f $DEVNET_ROOT/docker-compose.yml --profile isolated"
+export MY_UID=${MY_UID:-$(id -u)}
+export MY_GID=${MY_GID:-$(id -g)}
+
+cmd=${1:-}; shift || true
+
+case "$cmd" in
+  start)
+    rundir=${1:?usage: isolated-node start <run dir>}
+    rundir=$(realpath "$rundir")
+    # never run against the golden DB: it is the one copy of the synced chain
+    golden=$(realpath "${GOLDEN_DB:-/mnt/cardano/preview}" 2>/dev/null || true)
+    if [ -n "$golden" ] && [ "$rundir" = "$golden" -o "$rundir/db" = "$golden" ]; then
+      echo "refusing: $rundir is the golden DB. Clone it first:" >&2
+      echo "  cp -a --reflink=always $golden/db <run dir>/db" >&2
+      exit 1
+    fi
+    for d in chain db ipc; do
+      [ -d "$rundir/$d" ] || { echo "missing $rundir/$d" >&2; exit 1; }
+    done
+    export ISOLATED_RUN_DIR=$rundir
+    # fork gates, if this run defines them
+    if [ -f "$rundir/chain/fork.env" ]; then
+      export ISOLATED_ENV_FILE=$rundir/chain/fork.env
+      echo "fork env: $ISOLATED_ENV_FILE"
+      sed 's/^/  /' "$ISOLATED_ENV_FILE"
+    else
+      echo "fork env: none (gates unset)"
+    fi
+    # the stopped container is kept around so its log survives; recreate it so
+    # this run's config and mounts take effect
+    $COMPOSE up -d --force-recreate cardano-node-isolated
+    echo "started; socket at $rundir/ipc/node.socket"
+    ;;
+  stop)
+    # image STOPSIGNAL is SIGINT, so this is a clean shutdown. The container is
+    # deliberately NOT removed: docker logs devnet-node-isolated still works
+    # afterwards, which is what you want after a failed fork run.
+    sock=$(docker inspect devnet-node-isolated \
+             --format '{{range .Mounts}}{{if eq .Destination "/ipc"}}{{.Source}}{{end}}{{end}}' \
+             2>/dev/null)/node.socket
+    docker stop devnet-node-isolated
+    # drop the stale socket file so probing a stopped run fails honestly
+    # ("No such file or directory" rather than "Connection refused")
+    [ -S "$sock" ] && rm -f "$sock" && echo "removed stale socket $sock"
+    ;;
+  logs)
+    docker logs "$@" devnet-node-isolated
+    ;;
+  cli)
+    # cardano-cli in the same image, sharing the node's ipc dir and network
+    # namespace (none), so it reaches the node only through the socket
+    docker run --rm -i \
+      --network container:devnet-node-isolated \
+      --user "$MY_UID:$MY_GID" \
+      --volumes-from devnet-node-isolated \
+      -e CARDANO_NODE_SOCKET_PATH=/ipc/node.socket \
+      --entrypoint /usr/local/bin/cardano-cli \
+      "${DEVNET_IMAGE:-ghcr.io/cryptophonic/cardano-node-ogmios:v7.0.0_11.1.2-custom-cb30ce58}" \
+      "$@"
+    ;;
+  *)
+    sed -n '3,15p' "$0"
+    exit 1
+    ;;
+esac
