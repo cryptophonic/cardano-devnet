@@ -26,11 +26,16 @@ services:
     volumes:
       - ${PWD}:/work
       - ${DEVNET_ROOT}/runtime:/runtime
+      # scripts/cardano-cli sets ISOLATED_IPC to the directory of a host-side
+      # CARDANO_NODE_SOCKET_PATH outside runtime/ipc, so the cli talks to that
+      # node instead of the devnet's. Set CARDANO_NODE_NETWORK_ID to match that
+      # node's network (preview-derived chains are magic 2, not 42).
+      - ${ISOLATED_IPC:-${DEVNET_ROOT}/runtime/ipc}:/runtime/ipc
       - ${CARDANO_ASSETS_PATH}:/assets
     working_dir: /work
     environment:
       - CARDANO_NODE_SOCKET_PATH=/runtime/ipc/node.socket
-      - CARDANO_NODE_NETWORK_ID=42
+      - CARDANO_NODE_NETWORK_ID=${CARDANO_NODE_NETWORK_ID:-42}
 
   cardano-node:
     image: ${DEVNET_IMAGE:-ghcr.io/cryptophonic/cardano-node-ogmios:v7.0.0_11.1.2-custom-cb30ce58}

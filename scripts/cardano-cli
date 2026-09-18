@@ -28,7 +28,14 @@ for i in "${@:1}"; do
 done
 
 if [ -z ${clipath+x} ]; then
-  # cardano-cli not in PATH external to this directory
+  # cardano-cli not in PATH external to this directory.
+  # If CARDANO_NODE_SOCKET_PATH points at a live socket outside the devnet
+  # runtime (e.g. an isolated fork-mode run under /mnt/cardano/runs), mount that
+  # directory over /runtime/ipc so the containerised cli talks to that node.
+  if [ -S "${CARDANO_NODE_SOCKET_PATH:-}" ] &&
+     [ "$(dirname "$CARDANO_NODE_SOCKET_PATH")" != "$DEVNET_ROOT/runtime/ipc" ]; then
+    export ISOLATED_IPC=$(dirname "$CARDANO_NODE_SOCKET_PATH")
+  fi
   exec docker compose -f $DEVNET_ROOT/docker-compose.yml run --rm -T cardano-cli "${newargs[@]}"
 else 
   exec $clipath/cardano-cli "${@:1}"
