@@ -22,7 +22,7 @@ $ echo $GHCR_TOKEN | docker login ghcr.io -u <your-github-username> --password-s
    The credentials are stored by docker (in `~/.docker/config.json` unless you use a credential helper), so this is a one-time step per machine. Verify the pull works before continuing:
 
 ```
-$ docker pull ghcr.io/cryptophonic/cardano-node-ogmios:v7.0.0_11.1.2-custom
+$ docker pull ghcr.io/cryptophonic/cardano-node-ogmios:v7.0.0_11.1.2-custom-a3c7202
 ```
 
    If you see `denied` or `unauthorized`, the token is missing the read:packages scope or hasn't been authorized for the organization. To use a different image, override it by setting `DEVNET_IMAGE` in your environment — docker-compose falls back to the ghcr.io image above when it isn't set.
