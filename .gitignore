@@ -7,3 +7,6 @@ cardano-devnet.log
 # Locally-built cardano-node binary, baked into the published image instead
 bin
 
+# Locally-built libfaketime.so.1, baked into the published image (scripts/build-faketime)
+docker/libfaketime.so.1
+

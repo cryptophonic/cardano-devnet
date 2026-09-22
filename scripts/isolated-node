@@ -13,6 +13,12 @@
 #
 # The run directory is a copy of the golden DB plus an isolated config; never
 # point this at the golden DB itself.
+#
+# If <run dir>/chain/faketime.env exists (written by scripts/set-faketime),
+# the container's clock is shifted via LD_PRELOAD'd libfaketime so "now" lands
+# just past a stale DB's tip, inside the ledger's forecast horizon -- lets a
+# forging run resume without waiting on a real DB re-sync. No such file =>
+# real clock, unchanged from before.
 
 set -euo pipefail
 
@@ -46,6 +52,14 @@ case "$cmd" in
     else
       echo "fork env: none (gates unset)"
     fi
+    # faked clock, if scripts/set-faketime wrote one for this run
+    if [ -f "$rundir/chain/faketime.env" ]; then
+      export ISOLATED_FAKETIME_ENV_FILE=$rundir/chain/faketime.env
+      echo "faketime env: $ISOLATED_FAKETIME_ENV_FILE"
+      sed 's/^/  /' "$ISOLATED_FAKETIME_ENV_FILE"
+    else
+      echo "faketime env: none (real clock)"
+    fi
     # the stopped container is kept around so its log survives; recreate it so
     # this run's config and mounts take effect
     $COMPOSE up -d --force-recreate cardano-node-isolated
@@ -75,11 +89,11 @@ case "$cmd" in
       --volumes-from devnet-node-isolated \
       -e CARDANO_NODE_SOCKET_PATH=/ipc/node.socket \
       --entrypoint /usr/local/bin/cardano-cli \
-      "${DEVNET_IMAGE:-ghcr.io/cryptophonic/cardano-node-ogmios:v7.0.0_11.1.2-custom-cb30ce58}" \
+      "${DEVNET_IMAGE:-ghcr.io/cryptophonic/cardano-node-ogmios:v7.0.0_11.1.2-custom-cb30ce58-faketime}" \
       "$@"
     ;;
   *)
-    sed -n '3,15p' "$0"
+    sed -n '3,21p' "$0"
     exit 1
     ;;
 esac

@@ -57,6 +57,17 @@ FROM node-${NODE_VARIANT}
 ARG CARDANO_NODE_VERSION
 ARG OGMIOS_VERSION
 
+# libfaketime, RPATH-patched to THIS image's own glibc. Lets a container-local
+# clock shift (LD_PRELOAD + FAKETIME env vars) reach the node's GHC-compiled
+# clock calls without loading a second, mismatched glibc into the process --
+# verified empirically that LD_PRELOAD is not bypassed by the vDSO here (see
+# test/fixtures/fork-mode-faketime.md). Built by scripts/build-faketime
+# (gitignored artifact, same convention as bin/cardano-node); rerun that
+# script if CARDANO_NODE_VERSION changes, since the glibc store path it's
+# patched against may change too. Inert unless a service actually sets
+# LD_PRELOAD -- see docker-compose.yml.
+COPY --chmod=0644 docker/libfaketime.so.1 /opt/faketime/libfaketime.so.1
+
 LABEL name="cardano-node-ogmios" \
       description="cardano-node ${CARDANO_NODE_VERSION} + cardano-cli + ogmios ${OGMIOS_VERSION}"
 

@@ -18,7 +18,7 @@ services:
       #- ${CARDANO_ASSETS_PATH}:/assets
 
   cardano-cli:
-    image: ${DEVNET_IMAGE:-ghcr.io/cryptophonic/cardano-node-ogmios:v7.0.0_11.1.2-custom-cb30ce58}
+    image: ${DEVNET_IMAGE:-ghcr.io/cryptophonic/cardano-node-ogmios:v7.0.0_11.1.2-custom-cb30ce58-faketime}
     # x86-64 image (custom cardano-node build); on arm64 hosts this runs under emulation
     platform: linux/amd64
     user: $MY_UID:$MY_GID
@@ -38,7 +38,7 @@ services:
       - CARDANO_NODE_NETWORK_ID=${CARDANO_NODE_NETWORK_ID:-42}
 
   cardano-node:
-    image: ${DEVNET_IMAGE:-ghcr.io/cryptophonic/cardano-node-ogmios:v7.0.0_11.1.2-custom-cb30ce58}
+    image: ${DEVNET_IMAGE:-ghcr.io/cryptophonic/cardano-node-ogmios:v7.0.0_11.1.2-custom-cb30ce58-faketime}
     # x86-64 image (custom cardano-node build); on arm64 hosts this runs under emulation
     platform: linux/amd64
     container_name: devnet-cardano-node
@@ -75,18 +75,32 @@ services:
   # directory containing chain/, db/ and ipc/.
   cardano-node-isolated:
     profiles: ["isolated"]
-    image: ${DEVNET_IMAGE:-ghcr.io/cryptophonic/cardano-node-ogmios:v7.0.0_11.1.2-custom-cb30ce58}
+    image: ${DEVNET_IMAGE:-ghcr.io/cryptophonic/cardano-node-ogmios:v7.0.0_11.1.2-custom-cb30ce58-faketime}
     # x86-64 image (custom cardano-node build); on arm64 hosts this runs under emulation
     platform: linux/amd64
     container_name: devnet-node-isolated
     user: $MY_UID:$MY_GID
     entrypoint: /usr/local/bin/cardano-node
     network_mode: none
-    # Fork gates come from an env file, defaulting to an empty one so a plain
-    # run has them unset (that inertness is what phase 1 proves).
-    # scripts/isolated-node points ISOLATED_ENV_FILE at <run dir>/chain/fork.env
-    # when that file exists.
-    env_file: ${ISOLATED_ENV_FILE:-/dev/null}
+    # Fork gates and (optionally) a faked clock come from env files, each
+    # defaulting to an empty one so a plain run has them unset (that
+    # inertness is what phase 1 proves). scripts/isolated-node points
+    # ISOLATED_ENV_FILE at <run dir>/chain/fork.env when that file exists, and
+    # ISOLATED_FAKETIME_ENV_FILE at <run dir>/chain/faketime.env (written by
+    # scripts/set-faketime) when that one does.
+    env_file:
+      - ${ISOLATED_ENV_FILE:-/dev/null}
+      - ${ISOLATED_FAKETIME_ENV_FILE:-/dev/null}
+    # LD_PRELOAD and FAKETIME come ONLY from faketime.env above (when
+    # present) -- deliberately not set here too, since compose's
+    # `environment:` overrides `env_file:` for the same key and an empty
+    # default here would silently blank out whatever faketime.env set.
+    # FAKETIME_DONT_FAKE_MONOTONIC=1 is safe to set unconditionally: it's a
+    # no-op unless libfaketime is actually loaded, and whenever it is we
+    # always want it -- CLOCK_MONOTONIC drives consensus timers and must not
+    # jump.
+    environment:
+      - FAKETIME_DONT_FAKE_MONOTONIC=1
     # the image healthcheck probes ogmios, which is not running here
     healthcheck:
       test: ["CMD-SHELL", "test -S /ipc/node.socket"]
@@ -108,7 +122,7 @@ services:
       - ${ISOLATED_RUN_DIR:-/var/empty}/ipc:/ipc
 
   ogmios:
-    image: ${DEVNET_IMAGE:-ghcr.io/cryptophonic/cardano-node-ogmios:v7.0.0_11.1.2-custom-cb30ce58}
+    image: ${DEVNET_IMAGE:-ghcr.io/cryptophonic/cardano-node-ogmios:v7.0.0_11.1.2-custom-cb30ce58-faketime}
     # x86-64 image (custom cardano-node build); on arm64 hosts this runs under emulation
     platform: linux/amd64
     container_name: devnet-ogmios

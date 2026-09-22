@@ -1,0 +1,65 @@
+#!/bin/bash
+
+# Build libfaketime.so.1 for docker/Dockerfile, RPATH-patched to the EXACT
+# glibc already present in the base cardano-node image, so LD_PRELOADing it
+# never puts two different glibcs in one process.
+#
+# Why this matters: the custom cardano-node binary is a Nix build, dynamically
+# linked against an absolute /nix/store glibc closure that ships inside the
+# upstream ghcr.io/intersectmbo/cardano-node image (see docker/Dockerfile).
+# libfaketime built naively (via `nix build nixpkgs#libfaketime` on the host,
+# or a distro package) links against a DIFFERENT glibc build -- same version
+# number, different store hash / build -- and loading both into one address
+# space is exactly the kind of thing that fails or misbehaves in confusing
+# ways. Patching libfaketime's RPATH to point at the image's own glibc
+# directory means the dynamic linker resolves libc.so.6 (and libdl/librt/
+# libpthread/libm) to the one store path already in the image, not a second
+# one shipped alongside it.
+#
+# Empirically verified (2026-09-21) that this actually reaches the GHC
+# binary's clock calls -- LD_PRELOAD is not bypassed by the vDSO here -- see
+# test/fixtures/fork-mode-faketime.md.
+#
+# Usage:
+#   scripts/build-faketime                # writes docker/libfaketime.so.1
+#   scripts/build-faketime <base image>   # override the image to match against
+#
+# Requires: nix (host), docker.
+# Output: docker/libfaketime.so.1 (gitignored -- same convention as bin/, a
+# locally-built artifact baked into the image, not checked in).
+
+set -euo pipefail
+
+DEVNET_ROOT=${DEVNET_ROOT:-$(git -C "$(dirname "$0")" rev-parse --show-toplevel)}
+BASE_IMAGE=${1:-ghcr.io/intersectmbo/cardano-node:${CARDANO_NODE_VERSION:-11.1.1}}
+OUT=$DEVNET_ROOT/docker/libfaketime.so.1
+
+echo "base image: $BASE_IMAGE" >&2
+docker pull --platform linux/amd64 "$BASE_IMAGE" >&2
+
+# The base image's own glibc store dir: the one /nix/store/*-glibc-2.* entry
+# that actually contains lib/libc.so.6 (as opposed to the sibling *-glibc-*-bin
+# entry, which holds ldd/ldconfig/etc and has no lib/libc.so.6). Matched this
+# way rather than a hardcoded version string, so a base image bump is picked
+# up automatically -- rerun this script whenever CARDANO_NODE_VERSION changes.
+GLIBC_LIB=$(docker run --rm --platform linux/amd64 --entrypoint /bin/sh "$BASE_IMAGE" -c '
+  for d in /nix/store/*-glibc-2.*; do
+    [ -e "$d/lib/libc.so.6" ] && { echo "$d/lib"; exit 0; }
+  done
+  exit 1
+')
+[ -n "$GLIBC_LIB" ] || { echo "could not find a glibc store dir with lib/libc.so.6 in $BASE_IMAGE" >&2; exit 1; }
+echo "image glibc: $GLIBC_LIB" >&2
+
+export PATH=$HOME/.nix-profile/bin:$PATH
+LFT=$(nix build --no-link --print-out-paths 'nixpkgs#libfaketime' | tail -1)
+echo "host libfaketime build: $LFT" >&2
+
+WORK=$(mktemp -d)
+trap 'rm -rf "$WORK"' EXIT
+cp "$LFT/lib/libfaketime.so.1" "$WORK/libfaketime.so.1"
+chmod u+w "$WORK/libfaketime.so.1"
+nix shell nixpkgs#patchelf -c patchelf --set-rpath "$GLIBC_LIB" "$WORK/libfaketime.so.1"
+
+install -m 0644 "$WORK/libfaketime.so.1" "$OUT"
+echo "wrote $OUT (rpath: $GLIBC_LIB)" >&2

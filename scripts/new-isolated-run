@@ -11,6 +11,14 @@
 #   new-isolated-run <N>                       # gates unset (phase 1 style)
 #   new-isolated-run <N> <fork slot> <block every>   # gates set
 #
+# FORK_NOW=<ISO8601 UTC, e.g. 2026-09-21T22:08:14Z> overrides "now" for the
+# opcert's KES period. Only needed when the run will start immediately under a
+# faked clock (scripts/set-faketime, e.g. a from-scratch reproducible restart
+# test): the OCERT rule checks the opcert's KES period against the node's OWN
+# clock, so an opcert issued at the real-now period is future-dated (rejected)
+# once that node's clock is faked backward. Ordinary runs that start under the
+# real clock don't need this.
+#
 # Then: isolated-node start <RUNS>/run-<N>
 
 set -euo pipefail
@@ -41,12 +49,15 @@ $CLI latest node new-counter \
   --counter-value 0 \
   --operational-certificate-issue-counter-file "$RUN/chain/opcert.counter"
 
-# opcert at the current KES period (fork-mode rule)
+# opcert at the current KES period (fork-mode rule), or FORK_NOW's period if
+# set (see usage above -- needed when the node will start under a faked clock)
 KES=$(python3 -c "
-import datetime, json
+import datetime, json, os
 g = json.load(open('$RUN/chain/shelley-genesis.json'))
 s = datetime.datetime.strptime(g['systemStart'], '%Y-%m-%dT%H:%M:%SZ').replace(tzinfo=datetime.timezone.utc)
-now = datetime.datetime.now(datetime.timezone.utc)
+override = os.environ.get('FORK_NOW')
+now = (datetime.datetime.strptime(override, '%Y-%m-%dT%H:%M:%SZ').replace(tzinfo=datetime.timezone.utc)
+       if override else datetime.datetime.now(datetime.timezone.utc))
 print(int((now - s).total_seconds()) // g['slotsPerKESPeriod'])")
 $CLI latest node issue-op-cert \
   --kes-verification-key-file "$GOLDEN/pool/kes.vkey" \

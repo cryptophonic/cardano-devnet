@@ -1,0 +1,72 @@
+#!/bin/bash
+
+# Write (or clear) <run dir>/chain/faketime.env, which scripts/isolated-node
+# picks up automatically: it shifts the isolated node's clock via LD_PRELOAD'd
+# libfaketime (docker/Dockerfile, scripts/build-faketime) so "now" lands just
+# past a stale DB's tip -- inside the ledger's ~7.2h forecast horizon on
+# preview -- instead of failing leadership checks with NoLedgerView /
+# CurrentSlotUnknown against a chain that real time has left behind.
+#
+# Usage:
+#   set-faketime <run dir>              # derive from devnet-node-isolated's own
+#                                        # last logged tip (the time IT believed
+#                                        # it was at) -- run this right after
+#                                        # `isolated-node stop`
+#   set-faketime <run dir> --slot <N>   # derive from an explicit slot instead
+#   set-faketime <run dir> --clear      # remove faketime.env (back to real clock)
+#
+# Slot and wall-clock are exactly 1:1 on preview (slotLength=1s):
+#   time = systemStart + slot seconds, systemStart from shelley-genesis.json.
+# Don't reconstruct this from era history elsewhere; it's already this simple.
+#
+# Precision doesn't matter much -- the horizon is hours wide -- so this adds a
+# LEAD_SECONDS cushion (default 10) past the derived slot rather than landing
+# exactly on it.
+#
+# NOTE: the run's operational certificate must be issued at the KES period
+# that covers the faketime target, not the period covering real "now". A run
+# created fresh for a faketime test should pass FORK_NOW to
+# scripts/new-isolated-run (see its usage) rather than relying on this script
+# to fix up an already-issued opcert.
+
+set -euo pipefail
+
+LEAD=${LEAD_SECONDS:-10}
+
+rundir=${1:?usage: set-faketime <run dir> [--slot <N> | --clear]}
+rundir=$(realpath "$rundir")
+[ -d "$rundir/chain" ] || { echo "missing $rundir/chain" >&2; exit 1; }
+out=$rundir/chain/faketime.env
+
+if [ "${2:-}" = "--clear" ]; then
+  rm -f "$out"
+  echo "removed $out (real clock)"
+  exit 0
+fi
+
+if [ "${2:-}" = "--slot" ]; then
+  slot=${3:?usage: set-faketime <run dir> --slot <N>}
+else
+  slot=$(docker logs devnet-node-isolated 2>&1 | sed 's/\x1b\[[0-9;]*m//g' \
+         | grep -a 'Chain extended' | tail -1 | grep -oE 'at slot [0-9]+' | grep -oE '[0-9]+')
+  [ -n "$slot" ] || {
+    echo "no 'Chain extended' line in devnet-node-isolated's logs; pass --slot <N> explicitly" >&2
+    exit 1
+  }
+fi
+
+faketime=$(python3 -c "
+import datetime, json
+g = json.load(open('$rundir/chain/shelley-genesis.json'))
+s = datetime.datetime.strptime(g['systemStart'], '%Y-%m-%dT%H:%M:%SZ').replace(tzinfo=datetime.timezone.utc)
+t = s + datetime.timedelta(seconds=$slot + $LEAD)
+print(f'@{t:%Y-%m-%d %H:%M:%S}')
+")
+
+cat > "$out" <<EOF
+LD_PRELOAD=/opt/faketime/libfaketime.so.1
+FAKETIME=$faketime
+EOF
+echo "wrote $out:"
+sed 's/^/  /' "$out"
+echo "(from slot $slot + ${LEAD}s lead)"
