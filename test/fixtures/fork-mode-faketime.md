@@ -155,3 +155,73 @@ Published as
 the local build cache): T0 (`date` under `FAKETIME='-1h'`) and a real forging
 run against `run-16`'s fork gates + faketime.env both passed. This is now
 `docker-compose.yml`'s and `scripts/isolated-node`'s default `DEVNET_IMAGE`.
+
+## Regression re-check at 45 h staleness (2026-09-23) — and a published-image bug
+
+Re-ran the clock fix against the same golden DB, now **~44 h 50 m** stale (tip
+slot `123372484` = 2026-09-21T22:08:04Z; real now 2026-09-23T18:57Z) — ~6×
+past the ~7.2 h horizon, a stronger case than T2's tip+24 h arm.
+
+### Control: real clock, 45 h stale — `run-17`
+
+`new-isolated-run 17 123372484 20`, no `faketime.env`. Over 2 min:
+
+    BlockchainTime.CurrentSlotUnknown: Too far from the chain tip to determine
+    the current slot number for the time 2026-09-23 18:59:55… UTC
+
+0 blocks forged, `Chain extended` = 0. Note the tracer here is
+`BlockchainTime.CurrentSlotUnknown` (once a minute), **not** the
+`Forge.Loop.NoLedgerView` T2 saw at +24 h: past ~45 h the node cannot even map
+wall-clock to a slot, so leadership checks never start. Both symptoms are the
+same root cause; grep for both.
+
+### The published image was broken for non-root — `run-18`
+
+First faketime attempt failed at the dynamic linker:
+
+    ERROR: ld.so: object '/opt/faketime/libfaketime.so.1' from LD_PRELOAD
+    cannot be preloaded (cannot open shared object file): ignored.
+
+…and the run then behaved exactly like the control. Cause: in
+`ghcr.io/…-faketime` (digest `sha256:86624237f4fd…`), `/opt/faketime` had mode
+**`drw-r--r--`** — no search bit:
+
+    drw-r--r-- 2 0 0 4096 Sep 22 01:09 /opt/faketime
+    -rw-r--r-- 1 0 0 74560 libfaketime.so.1
+
+`COPY --chmod=0644 docker/libfaketime.so.1 /opt/faketime/libfaketime.so.1`
+applies the mode to the **implicitly created parent directory** as well. Root
+traverses a 0644 directory anyway (`CAP_DAC_OVERRIDE`), so `docker run`-as-root
+smoke tests pass; the container runs as an ordinary uid
+(`user: $MY_UID:$MY_GID`), which cannot, and `ld.so` only *warns* before
+continuing without the preload. The local `devnet-node-faketime:cb30ce58`
+image that T0–T3 were run against was built before the `--chmod` was added and
+has `drwxr-xr-x`, which is why the original pass was real but the published
+image did not carry it.
+
+Fix: `COPY --chmod=0755` (also the conventional mode for a shared object).
+Rebuilt, verified as a **non-root** uid:
+
+    $ docker run --user $(id -u):$(id -g) -e LD_PRELOAD=… -e FAKETIME='-96h' … date -u
+    Sat Sep 19 19:05:00 UTC 2026   (real: Wed Sep 23 19:05:00 UTC 2026)
+
+exactly −96 h. `ls -ld /opt/faketime` → `drwxr-xr-x`. Node/cli identity
+unchanged (`cardano-node 11.1.2 (fork mode)`, git rev `a3c7202d…`; `cardano-cli
+11.2.3.0`). **The ghcr tag has NOT been re-pushed** — the local tag now points
+at the fixed build (`sha256:542a73ebaede…`) while the registry still serves the
+broken `sha256:86624237f4fd…`. Republish before anyone pulls it fresh.
+
+### The fix, re-verified — `run-19`
+
+`FORK_NOW=2026-09-21T22:08:14Z new-isolated-run 19 123372484 20` (opcert at KES
+period **951**, the faked period — real now is 953) →
+`set-faketime run-19 --slot 123372484` → `isolated-node start`:
+
+    Chain extended … at slot 123372504, 524, 544, 564, 584, 604, 624, 644, 664, 680…
+
+19 blocks over a 6-minute window, exactly `BLOCK_EVERY=20` apart, **0**
+`NoLedgerView` / `CurrentSlotUnknown` / `BlockFromFuture`. `query tip` through
+the run's socket: slot 123372860, block 4684195, epoch 1427, Conway.
+
+**PASS at 45 h staleness**, once the image actually carries a loadable
+libfaketime.

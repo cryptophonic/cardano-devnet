@@ -66,7 +66,12 @@ ARG OGMIOS_VERSION
 # script if CARDANO_NODE_VERSION changes, since the glibc store path it's
 # patched against may change too. Inert unless a service actually sets
 # LD_PRELOAD -- see docker-compose.yml.
-COPY --chmod=0644 docker/libfaketime.so.1 /opt/faketime/libfaketime.so.1
+# NOTE: --chmod also sets the mode of the implicitly created parent directory,
+# so 0644 here would leave /opt/faketime without its search bit -- root can
+# still traverse it, but the container runs as an ordinary uid and ld.so would
+# silently report "cannot be preloaded (cannot open shared object file)".
+# 0755 is the conventional mode for a shared object anyway.
+COPY --chmod=0755 docker/libfaketime.so.1 /opt/faketime/libfaketime.so.1
 
 LABEL name="cardano-node-ogmios" \
       description="cardano-node ${CARDANO_NODE_VERSION} + cardano-cli + ogmios ${OGMIOS_VERSION}"
