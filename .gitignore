@@ -10,3 +10,7 @@ bin
 # Locally-built libfaketime.so.1, baked into the published image (scripts/build-faketime)
 docker/libfaketime.so.1
 
+
+# Claude View live snapshot: rewritten on every response (see CLAUDE.md), so
+# tracking it would be pure churn. The durable record lives in test/fixtures/.
+.claude/view/
