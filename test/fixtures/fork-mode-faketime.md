@@ -225,3 +225,25 @@ the run's socket: slot 123372860, block 4684195, epoch 1427, Conway.
 
 **PASS at 45 h staleness**, once the image actually carries a loadable
 libfaketime.
+
+### Republished image verified (2026-09-23)
+
+The tag was rebuilt and re-pushed from another machine off the committed
+Dockerfile. Verified here from a **fresh pull**, not the local build:
+
+- digest `sha256:d99bdaaa95e6…` (the broken one was `sha256:86624237f4fd…`)
+- `/opt/faketime` → `drwxr-xr-x`, `libfaketime.so.1` → `-rwxr-xr-x`
+- T0 as a non-root uid: `FAKETIME='-96h'` → `Sat Sep 19 19:30:18 UTC 2026`
+  against real `Wed Sep 23 19:30:18 UTC 2026`, exactly −96 h, no `ld.so`
+  warning
+- contents byte-identical to the host artifacts:
+  `libfaketime.so.1` `ac121a28c844…`, `cardano-node` `cb30ce58b8f0…` (matches
+  the tag's suffix); `cardano-node 11.1.2 (fork mode)` rev `a3c7202d…`,
+  `cardano-cli 11.2.3.0`, `ogmios v7.0.0 (b3a830a1)` all unchanged
+- `run-20`, a fresh clone of the same still-45 h-stale golden DB: forged at
+  slots 123372520, 540, 560, 580, 600, 620, 640, 660, 680 — 9 blocks at the
+  20-slot cadence, 0 preload warnings, 0 `NoLedgerView` /
+  `CurrentSlotUnknown` / `BlockFromFuture`. `query tip`: slot 123372680,
+  block 4684186, epoch 1427, Conway.
+
+The registry now serves a working image.
