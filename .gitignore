@@ -11,6 +11,10 @@ bin
 docker/libfaketime.so.1
 
 
-# Claude View live snapshot: rewritten on every response (see CLAUDE.md), so
+# Personal/machine-specific Claude instructions; the tracked CLAUDE.md is
+# contributor-facing only.
+CLAUDE.local.md
+
+# Claude View live snapshot: rewritten on every response (see CLAUDE.local.md), so
 # tracking it would be pure churn. The durable record lives in test/fixtures/.
 .claude/view/
