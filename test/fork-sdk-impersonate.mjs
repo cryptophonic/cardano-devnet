@@ -11,6 +11,10 @@
 // Needs a running fork (devnet fork start <n>); it starts the ogmios sidecar
 // itself. It SPENDS from the impersonated address on that fork, so run it against
 // a fork you are willing to advance, never the golden DB.
+//
+// Picks its victim from the fork's own extracted seeds (devnet fork seeds <n>)
+// when available, falling back to the hardcoded whale below for a fork that
+// predates Step 4 -- both name the same preview address either way.
 
 import { Blaze } from '@blaze-cardano/sdk'
 import { Address } from '@blaze-cardano/core'
@@ -24,7 +28,7 @@ const PAYMENT = 1_000_000_000n
 
 const args = process.argv.slice(2)
 const forkName = args.find(a => !a.startsWith('--')) ?? 'sdk1'
-const victim = args.includes('--address') ? args[args.indexOf('--address') + 1] : WHALE
+const addressArg = args.includes('--address') ? args[args.indexOf('--address') + 1] : undefined
 
 let failures = 0
 const check = (ok, what, detail = '') => {
@@ -36,6 +40,11 @@ const fork = await openFork(forkName)
 try {
   console.log(`fork '${fork.name}'  magic ${fork.networkMagic}  fork slot ${fork.forkSlot}`)
   console.log(`god key ${fork.godKeyHash}\n        ${fork.godKeyPath}`)
+
+  const victim = addressArg ?? (fork.manifest.seeds?.some(s => s.role === 'whale')
+    ? fork.seed('whale').address
+    : WHALE)
+  console.log(`victim  ${victim}${addressArg ? '' : fork.manifest.seeds?.length ? '  (from devnet fork seeds)' : '  (hardcoded fallback, no seeds extracted)'}`)
 
   const tip = await fork.tip()
   const clock = await fork.now()

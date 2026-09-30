@@ -3,8 +3,8 @@
 //   import { openFork } from './src/fork/index.mjs'
 //
 //   const fork = await openFork('sdk1')
-//   const whale = await fork.impersonate(
-//     'addr_test1vp8cprhse9pnnv7f4l3n6pj0afq2hjm6f7r2205dz0583egagfjah')
+//   await fork.extractSeeds()               // once per fork; verifies against its ledger
+//   const whale = fork.impersonateSeed('whale')
 //   const blaze = await Blaze.from(fork.provider, whale)
 //   const tx = await blaze.newTransaction().payLovelace(someone, 1_000_000_000n).complete()
 //   await fork.submit(await whale.sign(tx))
@@ -176,6 +176,44 @@ export class Fork {
     return this.manifest
   }
 
+  // ---------------------------------------------------------------- seeds
+
+  /**
+   * A known-funded test address, previously verified by `devnet fork seeds`.
+   *
+   * `manifest.seeds[].lovelace` is a string, not a JSON number: the whale
+   * candidate this usually resolves to holds more than
+   * `Number.MAX_SAFE_INTEGER` lovelace, and a bare JSON number would silently
+   * round under a plain `JSON.parse` the same way it did in `Ogmios.mjs`
+   * before `src/fork/ogmios.mjs` existed (fork-mode-sdk.md 11b).
+   * @param {string} [role='whale']
+   * @returns {{ address: string, role: string, utxo: string, lovelace: bigint }}
+   */
+  seed(role = 'whale') {
+    const found = (this.manifest.seeds ?? []).find(s => s.role === role)
+    if (!found) {
+      throw new Error(
+        `no seed with role '${role}' on fork '${this.name}'. Run ` +
+        `'devnet fork seeds ${this.name}' first, or pass an address to impersonate() directly.`
+      )
+    }
+    return { ...found, lovelace: BigInt(found.lovelace) }
+  }
+
+  /**
+   * Verify the checked-in candidate addresses against this fork's own ledger
+   * and record which are still funded. Wraps `devnet fork seeds`.
+   * @param {{ candidates?: string, onOutput?: (chunk: string) => void }} [opts]
+   * @returns {Promise<Array<{ address: string, role: string, utxo: string, lovelace: string }>>}
+   */
+  async extractSeeds({ candidates, onOutput } = {}) {
+    const args = ['seeds', this.name]
+    if (candidates) args.push('--candidates', candidates)
+    await devnetFork(args, { onOutput })
+    this.reload()
+    return this.manifest.seeds ?? []
+  }
+
   // ------------------------------------------------------------ impersonation
 
   /**
@@ -190,6 +228,16 @@ export class Fork {
       godKeyHash: this.godKeyHash,
       provider: this.provider
     })
+  }
+
+  /**
+   * `impersonate(this.seed(role).address)` -- a signer for a known-funded seed
+   * address rather than one the caller has to name.
+   * @param {string} [role='whale']
+   * @returns {ImpersonatedSigner}
+   */
+  impersonateSeed(role = 'whale') {
+    return this.impersonate(this.seed(role).address)
   }
 
   /**
