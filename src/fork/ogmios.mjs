@@ -166,4 +166,19 @@ export class LosslessOgmios {
     return this.request('queryNetwork/blockHeight')
   }
 
+  // --------------------------------------------------- chain-sync (replay)
+
+  /**
+   * @param {Array<{slot: number, id: string}|'origin'>} points
+   * @returns {Promise<{intersection: object, tip: object}>}
+   */
+  findIntersection(points) {
+    return this.request('findIntersection', { points })
+  }
+
+  /** @returns {Promise<{direction: 'forward'|'backward', block?: object, point?: object, tip: object}>} */
+  nextBlock() {
+    return this.request('nextBlock')
+  }
+
 }

@@ -15,8 +15,11 @@
 #   devnet fork status [<n>]
 #   devnet fork warp <n> --to-slot S | --to-epoch E [--rate R]
 #   devnet fork rate <n> <r>           # change a running fork's clock rate
+#   devnet fork clock-set <n> <slot> [--rate R]   # move the clock to an explicit slot
 #   devnet fork seeds <n> [--seed-min-ada A]      # extract spendable UTxOs >= A ADA to seeds.json
 #   devnet fork generate <n> --tps T --duration D [--shape transfer|fanout|mixed]
+#   devnet fork extract <source-fork> --from-slot S --to-slot T --out <file>
+#   devnet fork replay <n> --source ogmios:<url>|file:<path> --from-slot S --to-slot T
 #   devnet fork reset <n>              # back to the fork point
 #   devnet fork list
 #   devnet fork follow <manifest path> # start a follower beside the producer
@@ -1014,6 +1017,40 @@ json.dump(m,open(sys.argv[1],'w'),indent=2)" "$m" "$rate" "$be"
   change_rate "$run" "$tip" "$rate" "$be"
 }
 
+# ------------------------------------------------------------- clock-set
+
+# Move a running fork's clock to an EXPLICIT slot, not the live tip. `rate`
+# only ever resyncs to `live_tip_slot`, which is exactly wrong for replay:
+# replay's whole point is to track a SOURCE chain's original slot as it works
+# through blocks that are usually well behind the fork's own tip. Leaves
+# blockEvery alone -- this changes what time it is, not the forging cadence.
+cmd_clock_set() {
+  local name=${1:?usage: devnet fork clock-set <n> <slot> [--rate R]}
+  local slot=${2:?usage: devnet fork clock-set <n> <slot> [--rate R]}
+  shift 2
+  local rate=""
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --rate) rate=${2:?}; shift 2 ;;
+      *) die "clock-set: unknown argument $1" ;;
+    esac
+  done
+  local run; run=$(resolve_run "$name")
+  local m; m=$(require_manifest "$name")
+  fork_running "$run" || die "fork '$name' is not running:
+    devnet fork start $name"
+  [ -n "$rate" ] || rate=$(mget "$m" clock.rate)
+  rate=$(rate_str "$rate")
+  require_stamp_mode "$run" "$rate"
+
+  scale_mempool "$run" "$rate"
+  python3 -c "
+import json, sys
+m = json.load(open(sys.argv[1])); m['clock']['rate'] = float(sys.argv[2])
+json.dump(m, open(sys.argv[1], 'w'), indent=2)" "$m" "$rate"
+  echo "clock -> $(write_stamp "$run" "$slot" "$rate")"
+}
+
 # ---------------------------------------------------------------- seeds
 
 # Calibrated 2026-09-30 against preview's real UTxO set (3,192,387 entries):
@@ -1188,6 +1225,35 @@ cmd_generate() {
   fork_running "$run" || die "fork '$name' is not running:
     devnet fork start $name"
   exec node "$DEVNET_ROOT/src/fork/generate.mjs" "$@"
+}
+
+# ---------------------------------------------------------------- extract
+
+# Pull a range of a fork's own real chain history out to a single JSON file,
+# once, so `replay --source file:<path>` never needs the source chain up
+# again. Same reasoning as generate/replay: chain-sync + CBOR handling is a
+# Blaze problem. See src/fork/extract.mjs.
+cmd_extract() {
+  local name=${1:?usage: devnet fork extract <source-fork> --from-slot S --to-slot T --out <file>}
+  local run; run=$(resolve_run "$name")
+  require_manifest "$name" >/dev/null
+  fork_running "$run" || die "fork '$name' is not running:
+    devnet fork start $name"
+  exec node "$DEVNET_ROOT/src/fork/extract.mjs" "$@"
+}
+
+# ---------------------------------------------------------------- replay
+
+# Same reasoning as generate: reading a chain-sync or file source,
+# re-witnessing real transactions and asserting tx-id invariance is a Blaze
+# problem. See src/fork/replay.mjs.
+cmd_replay() {
+  local name=${1:?usage: devnet fork replay <n> --source ogmios:<url>|file:<path> --from-slot S --to-slot T [--stop-on-divergence] [--rate R]}
+  local run; run=$(resolve_run "$name")
+  require_manifest "$name" >/dev/null
+  fork_running "$run" || die "fork '$name' is not running:
+    devnet fork start $name"
+  exec node "$DEVNET_ROOT/src/fork/replay.mjs" "$@"
 }
 
 # ---------------------------------------------------------------- reset
@@ -1438,8 +1504,11 @@ case "$cmd" in
   status) cmd_status "$@" ;;
   warp)   cmd_warp "$@" ;;
   rate)   cmd_rate "$@" ;;
+  clock-set) cmd_clock_set "$@" ;;
   seeds)  cmd_seeds "$@" ;;
   generate) cmd_generate "$@" ;;
+  extract) cmd_extract "$@" ;;
+  replay) cmd_replay "$@" ;;
   reset)  cmd_reset "$@" ;;
   list)   cmd_list "$@" ;;
   follow) cmd_follow "$@" ;;

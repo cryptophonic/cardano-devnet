@@ -297,6 +297,32 @@ export class Fork {
     return generateLoad(this, opts)
   }
 
+  /**
+   * Replay real transactions from a source chain onto this fork, re-witnessed
+   * with the god key. Wraps `src/fork/replay.mjs` the same dynamic-import way
+   * `generate` wraps generate.mjs.
+   * @param {{ source: string, fromSlot: number, toSlot: number, stopOnDivergence?: boolean,
+   *           rate?: number, dump?: string, onEvent?: (e: object) => void }} opts
+   * @returns {Promise<object>} see `replayFrom` in replay.mjs
+   */
+  async replay(opts) {
+    const { replayFrom } = await import('./replay.mjs')
+    return replayFrom(this, opts)
+  }
+
+  /**
+   * Capture this fork's own real chain history into a single JSON file, for
+   * `replay({ source: 'file:<path>' })` to read back with no live connection
+   * at all. Wraps `src/fork/extract.mjs` the same dynamic-import way
+   * `generate`/`replay` wrap their own modules.
+   * @param {{ fromSlot: number, toSlot: number, out: string, onBlock?: (b: object) => void }} opts
+   * @returns {Promise<{ blocks: number, transactions: number, out: string }>}
+   */
+  async extractChain(opts) {
+    const { extractChain } = await import('./extract.mjs')
+    return extractChain(this, opts)
+  }
+
   async close() {
     await this.provider.close()
   }

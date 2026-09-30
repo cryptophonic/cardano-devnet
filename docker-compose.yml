@@ -167,7 +167,10 @@ services:
     command: [
       "--host", "0.0.0.0",
       "--node-socket", "/ipc/node.socket",
-      "--node-config", "/rundir/chain/config.json"
+      "--node-config", "/rundir/chain/config.json",
+      # `devnet fork replay`'s --source ogmios:<url> needs a transaction's raw
+      # CBOR to strip and re-witness it; ogmios omits it unless asked.
+      "--include-transaction-cbor"
     ]
     volumes:
       - ${ISOLATED_RUN_DIR:-/var/empty}:/rundir
