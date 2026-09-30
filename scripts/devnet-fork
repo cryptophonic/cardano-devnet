@@ -14,9 +14,12 @@
 #   devnet fork stop [<n>]
 #   devnet fork status [<n>]
 #   devnet fork warp <n> --to-slot S | --to-epoch E [--rate R]
+#   devnet fork rate <n> <r>           # change a running fork's clock rate
 #   devnet fork reset <n>              # back to the fork point
 #   devnet fork list
 #   devnet fork follow <manifest path> # start a follower beside the producer
+#   devnet fork ogmios start|stop|status|url [<n>]   # the fork's ogmios sidecar
+#   devnet fork clock [<n>]            # the forger's own faked clock, as JSON
 #
 # <n> is a fork name; the directory is <RUNS_DIR>/run-<n>. A run directory
 # path is accepted anywhere a name is.
@@ -56,6 +59,10 @@ container_for() { local b; b=$(basename "${1%/}"); echo "devnet-fork-${b#run-}";
 # Approximate RSS of one preview node, measured (fixture notes): 1.74 GiB.
 NODE_RSS_MB=${FORK_NODE_RSS_MB:-1800}
 
+# The shared bridge fork sidecars sit on. External to every fork's compose
+# project, created on demand; see docker-compose.yml.
+FORKS_NET=${FORKS_NET:-devnet-forks}
+
 # Security parameter k from preview's shelley genesis. Below k fork blocks a
 # reset can just drop volatile/; at or above it a fork block has reached the
 # ImmutableDB and only db-truncater can unfork (fixture fork-mode-unfork.md).
@@ -66,7 +73,7 @@ MEMPOOL_SOFT=1
 MEMPOOL_HARD=1.5
 MEMPOOL_CAPACITY=5
 
-usage() { sed -n '3,30p' "$0"; exit "${1:-1}"; }
+usage() { sed -n '3,33p' "$0"; exit "${1:-1}"; }
 die() { echo "devnet fork: $*" >&2; exit 1; }
 
 # ---------------------------------------------------------------- helpers
@@ -117,6 +124,18 @@ fork_running() {
 }
 
 running_fork_count() { running_fork_dirs | grep -c . || true; }
+
+# Which fork a subcommand means: the named one, else the sole running one.
+resolve_running() {
+  if [ -n "${1:-}" ]; then resolve_run "$1"; return; fi
+  local dirs; dirs=$(running_fork_dirs)
+  case "$(echo "$dirs" | grep -c .)" in
+    1) echo "$dirs" ;;
+    0) die "no fork producer running; name one" ;;
+    *) die "several forks are running; name one:
+$(echo "$dirs" | sed 's/^/  /')" ;;
+  esac
+}
 
 # blockEvery that holds ~5 blocks/s at a given rate, floored at 1 slot.
 block_every_for_rate() {
@@ -243,6 +262,36 @@ spec = f'@{slot_to_time($slot):%Y-%m-%d %H:%M:%S}'
 if '$rate' not in ('', '1'): spec += ' x$rate'
 open(sys.argv[2] + '/chain/faketime.stamp', 'w').write(spec + chr(10))
 print(spec)" "$run/chain/shelley-genesis.json" "$run"
+}
+
+# Move a RUNNING fork to a new clock rate. A rate change is a stamp write at the
+# CURRENT tip with the new multiplier; the cadence gate has to move with it or
+# the chain would run at the wrong blocks/s. BLOCK_EVERY is read at node start,
+# so it takes effect next start. Callers write the manifest first, on purpose: an
+# interruption should leave the run claiming what it is about to become rather
+# than silently disagreeing with its own files.
+change_rate() {
+  local run=$1 tip=$2 rate=$3 be=$4
+  require_stamp_mode "$run" "$rate"
+  if grep -q '^CARDANO_FORK_BLOCK_EVERY=' "$run/chain/fork.env"; then
+    sed -i "s/^CARDANO_FORK_BLOCK_EVERY=.*/CARDANO_FORK_BLOCK_EVERY=$be/" "$run/chain/fork.env"
+  fi
+  scale_mempool "$run" "$rate"
+  echo "clock -> $(write_stamp "$run" "$tip" "$rate")"
+  echo "note: BLOCK_EVERY=$be and the mempool timeouts are read at node start, so"
+  echo "      the clock changes now and the cadence on the next start"
+}
+
+# A clock baked into FAKETIME at process start cannot be moved while the node
+# runs, so refuse before anything is written rather than half-way through.
+require_stamp_mode() {
+  local run=$1 rate=$2
+  stamp_mode "$run" && return 0
+  die "the fork at $run has its clock baked into FAKETIME, so the rate cannot be
+  changed while it runs. Recreate it with a current 'devnet fork create' (which
+  uses stamp-file mode), or stop it, run
+    set-faketime $run --slot <its last forged slot> --rate $rate --fake-monotonic --stamp
+  and start it again."
 }
 
 # The forger's own faked clock, as a slot. Its last 'Chain extended' line is a
@@ -428,7 +477,17 @@ apply_rate() {
   local args=("$run" --slot "$slot" --fake-monotonic --stamp)
   [ "$rate" != "1" ] && args+=(--rate "$rate")
   "$SCRIPTS/set-faketime" "${args[@]}"
+  scale_mempool "$run" "$rate"
+}
 
+# Mempool admission timeouts are wall-clock seconds measured on the node's own
+# (accelerated) clock, so at x100 the stock values expire before a transaction can
+# be admitted at all and every submission fails MempoolTxTooSlow
+# (fork-mode-rate-and-epoch.md 9c). They live in config.json, which the node reads
+# at start -- so like CARDANO_FORK_BLOCK_EVERY, a change here lands on the next
+# start, and writing it keeps the run's files agreeing with its claimed rate.
+scale_mempool() {
+  local run=$1 rate=$2
   python3 -c "
 import json, sys
 run, rate = sys.argv[1], float(sys.argv[2])
@@ -463,6 +522,7 @@ print(kes_of($slot + 10))" "$run/chain/shelley-genesis.json")
   M_GOD=$(sed -n 's/^CARDANO_FORK_GOD_KEY=//p' "$run/chain/fork.env") \
   M_POOL=$(sed -n 's/^CARDANO_FORK_POOL_ID=//p' "$run/chain/fork.env") \
   M_ADDR=$addr M_KES=$kes M_RATE=$rate M_BE=$be M_IMAGE=$IMAGE \
+  M_GODKEY=$source/god/god.skey \
   M_DIGEST=$(docker image inspect "$IMAGE" --format '{{index .RepoDigests 0}}' 2>/dev/null | sed 's/.*@//' || true) \
   M_MITHRIL=$mithril \
   write_manifest_env "$run"
@@ -530,6 +590,7 @@ print(kes_of($slot))" "$run/chain/shelley-genesis.json")
   M_SLOT=$slot M_HASH=$hash M_GOD=$(sed -n 's/^CARDANO_FORK_GOD_KEY=//p' "$run/chain/fork.env") \
   M_POOL=$(sed -n 's/^CARDANO_FORK_POOL_ID=//p' "$run/chain/fork.env") \
   M_ADDR=$addr M_KES=$kes M_RATE=$rate M_BE=$be M_ROLE=$role M_IMAGE=$IMAGE \
+  M_GODKEY=$(dirname "$gv")/god.skey \
   M_DIGEST=$(docker image inspect "$IMAGE" --format '{{index .RepoDigests 0}}' 2>/dev/null | sed 's/.*@//' || true) \
   M_MITHRIL="" \
   write_manifest_env "$run"
@@ -580,6 +641,11 @@ m = {
     'time': slot_to_time(slot).strftime('%Y-%m-%dT%H:%M:%SZ'),
   },
   'godKeyHash': os.environ['M_GOD'],
+  # Where the signing key for that hash lives. The key is deliberately NOT
+  # copied into the run: a run directory is disposable and gets cloned, the
+  # identity is not. A client that cannot read this path cannot sign for the
+  # fork, which is the correct failure.
+  'godKeyPath': os.environ.get('M_GODKEY') or None,
   'producer': {
     'poolId': os.environ['M_POOL'],
     'address': os.environ['M_ADDR'] or None,
@@ -718,6 +784,14 @@ cmd_stop() {
 $(echo "$dirs" | sed 's/^/  /')" ;;
     esac
   fi
+  # The sidecar is restart: on-failure and talks to the node's socket, so leaving
+  # it behind a stopped node means an endless restart loop against a dead socket.
+  local oc; oc=$(ogmios_container_for "$run")
+  if docker inspect "$oc" >/dev/null 2>&1; then
+    docker rm -f "$oc" >/dev/null
+    echo "removed the ogmios sidecar $oc"
+  fi
+
   # the follower lives in the producer's network namespace, so it goes first
   local frun=$run-follower
   if [ -d "$frun" ] && docker inspect -f '{{.State.Running}}' "$(container_for "$frun")" 2>/dev/null | grep -qx true; then
@@ -866,25 +940,12 @@ m=json.load(open(sys.argv[1])); m['clock']['rate']=float(sys.argv[2]); m['blockE
 m['clock']['warpTarget']=int(sys.argv[4])
 json.dump(m,open(sys.argv[1],'w'),indent=2)" "$m" "$rate" "$be" "$target"
 
-  stamp_mode "$run" || die "fork '$name' has its clock baked into FAKETIME, so the rate
-  cannot be changed while it runs. Recreate it with a current 'devnet fork create'
-  (which uses stamp-file mode), or stop it, run
-    set-faketime $run --slot <its last forged slot> --rate $rate --fake-monotonic --stamp
-  and start it again."
+  require_stamp_mode "$run" "$rate"
 
-  # A rate change is a stamp write at the CURRENT tip with the new multiplier;
-  # the cadence gate has to move with it or the chain would run at the wrong
-  # blocks/s. BLOCK_EVERY is read at node start, so it takes effect next start.
   # Only touch the clock if the rate actually changed. A needless stamp write
   # re-anchors the speed-up at the read, which can move the clock BACKWARDS
   # relative to where it had run to (fork-mode-clock-signal.md 10d).
-  if [ "$rate" != "$old_rate" ]; then
-    if grep -q '^CARDANO_FORK_BLOCK_EVERY=' "$run/chain/fork.env"; then
-      sed -i "s/^CARDANO_FORK_BLOCK_EVERY=.*/CARDANO_FORK_BLOCK_EVERY=$be/" "$run/chain/fork.env"
-    fi
-    echo "clock -> $(write_stamp "$run" "$tip" "$rate")"
-    echo "note: BLOCK_EVERY=$be is read at node start, so the cadence changes on the next start"
-  fi
+  [ "$rate" != "$old_rate" ] && change_rate "$run" "$tip" "$rate" "$be"
 
   # Now wait for the chain to reach the target.
   local deadline=$(( SECONDS + ${WARP_TIMEOUT:-3600} ))
@@ -912,6 +973,40 @@ ARRPY
 import json,sys
 m=json.load(open(sys.argv[1])); m['clock'].pop('warpTarget',None)
 json.dump(m,open(sys.argv[1],'w'),indent=2)" "$m"
+}
+
+# ---------------------------------------------------------------- rate
+
+# The rate on its own, with no destination. `warp` changes the rate as a side
+# effect of going somewhere, and `start --rate` needs a restart; this is the one
+# that just changes how fast a running fork's clock runs.
+cmd_rate() {
+  local name=${1:?usage: devnet fork rate <n> <r>}
+  local rate=${2:?usage: devnet fork rate <n> <r>}
+  local run; run=$(resolve_run "$name")
+  local m; m=$(require_manifest "$name")
+  fork_running "$run" || die "fork '$name' is not running. A stopped fork takes its
+  rate at start:
+    devnet fork start $name --rate $rate"
+
+  rate=$(rate_str "$rate")
+  local old_rate; old_rate=$(rate_str "$(mget "$m" clock.rate)")
+  if [ "$rate" = "$old_rate" ]; then
+    echo "fork '$name' is already at x$rate; leaving the clock alone"
+    return 0
+  fi
+  local be; be=$(block_every_for_rate "$rate")
+  local tip; tip=$(live_tip_slot "$(mget "$m" networkMagic)" "$run")
+  [ -n "$tip" ] || die "could not read the tip from the running node"
+
+  # refuse before writing anything if this run's clock cannot move
+  require_stamp_mode "$run" "$rate"
+  echo "rate x$old_rate -> x$rate at slot $tip: blockEvery $be"
+  python3 -c "
+import json,sys
+m=json.load(open(sys.argv[1])); m['clock']['rate']=float(sys.argv[2]); m['blockEvery']=int(sys.argv[3])
+json.dump(m,open(sys.argv[1],'w'),indent=2)" "$m" "$rate" "$be"
+  change_rate "$run" "$tip" "$rate" "$be"
 }
 
 # ---------------------------------------------------------------- reset
@@ -1030,6 +1125,127 @@ print(f'{slot_to_time($(mget "$src" fork.slot) + 10):%Y-%m-%dT%H:%M:%SZ}')" \
   echo "      re-run 'devnet fork follow' to re-synchronise if it drifts"
 }
 
+# ---------------------------------------------------------------- ogmios
+
+# One ogmios per fork, named after the fork's own container. It reaches the node
+# over <run>/ipc/node.socket and publishes NOTHING: it sits on the shared
+# devnet-forks bridge and is addressed there. The node keeps network_mode: none,
+# so the phase-8 isolation property is untouched however many sidecars run.
+ogmios_container_for() { echo "$(container_for "$1")-ogmios"; }
+
+# The bridge is external to every fork's compose project (see docker-compose.yml),
+# so somebody has to create it; that somebody is here.
+ensure_forks_net() {
+  docker network inspect "$FORKS_NET" >/dev/null 2>&1 || {
+    echo "creating the $FORKS_NET bridge"
+    docker network create "$FORKS_NET" >/dev/null
+  }
+}
+
+# A sidecar's address on the bridge. The host can route to a bridge IP directly
+# but cannot resolve a container name, so a client on the host asks docker for
+# the name's address rather than DNS -- same addressing, different resolver.
+ogmios_ip() {
+  docker inspect "$1" --format \
+    "{{with index .NetworkSettings.Networks \"$FORKS_NET\"}}{{.IPAddress}}{{end}}" 2>/dev/null
+}
+
+# Ogmios is up when it answers /health AND reports a connection to the node. Its
+# own "networkSynchronization" is measured against the REAL clock, so on a fork it
+# reads a little under 1 and drifts further as the golden DB ages (0.994 on a
+# nine-day-old clone); that is cosmetic and not a readiness signal.
+ogmios_wait() {
+  local ip=$1 deadline=$(( SECONDS + ${OGMIOS_TIMEOUT:-120} ))
+  while [ "$SECONDS" -lt "$deadline" ]; do
+    if python3 -c "
+import json, sys, urllib.request
+try:
+    h = json.load(urllib.request.urlopen('http://' + sys.argv[1] + ':1337/health', timeout=3))
+except Exception:
+    sys.exit(1)
+sys.exit(0 if h.get('connectionStatus') == 'connected' else 1)
+" "$ip" 2>/dev/null; then return 0; fi
+    sleep 2
+  done
+  return 1
+}
+
+cmd_ogmios() {
+  local action=${1:-status}; shift || true
+  local run; run=$(resolve_running "${1:-}")
+  local c; c=$(ogmios_container_for "$run")
+
+  case "$action" in
+    start)
+      fork_running "$run" || die "the fork at $run is not running, and ogmios needs
+  its socket. Start the fork first: devnet fork start <n>"
+      ensure_forks_net
+      export ISOLATED_RUN_DIR=$run FORK_OGMIOS_NAME=$c
+      export MY_UID=${MY_UID:-$(id -u)} MY_GID=${MY_GID:-$(id -g)}
+      # its own compose project, for the same reason the node has one: a second
+      # fork must be an addition, not a replacement
+      docker compose -p "$c" -f "$DEVNET_ROOT/docker-compose.yml" \
+        --profile fork-sidecar up -d --force-recreate ogmios-fork
+      local ip; ip=$(ogmios_ip "$c")
+      [ -n "$ip" ] || die "ogmios started but has no address on $FORKS_NET"
+      ogmios_wait "$ip" || die "ogmios at $ip:1337 never reported a node connection.
+  Its log:
+$(docker logs --tail 20 "$c" 2>&1 | sed 's/^/    /')"
+      echo "ogmios ready: ws://$ip:1337  (container $c, nothing published)"
+      ;;
+    stop)
+      docker inspect "$c" >/dev/null 2>&1 || { echo "no ogmios sidecar for $run"; return 0; }
+      # removed, not stopped: unlike a fork run there is nothing in its log worth
+      # keeping, and a stale container would hold the bridge address
+      docker rm -f "$c" >/dev/null
+      echo "removed $c"
+      ;;
+    url)
+      local ip; ip=$(ogmios_ip "$c")
+      [ -n "$ip" ] || die "no ogmios sidecar running for $run -- devnet fork ogmios start"
+      echo "ws://$ip:1337"
+      ;;
+    status)
+      if docker inspect -f '{{.State.Running}}' "$c" 2>/dev/null | grep -qx true; then
+        echo "ogmios      running  ws://$(ogmios_ip "$c"):1337  ($c)"
+      else
+        echo "ogmios      stopped  ($c)"
+      fi
+      ;;
+    *) die "ogmios: unknown action '$action' (start|stop|status|url)" ;;
+  esac
+}
+
+# ---------------------------------------------------------------- clock
+
+# The forger's own faked clock, for a client that needs "now" on the fork. There
+# is no cheap general source: a child process under libfaketime re-anchors the
+# multiplier and reports the bare anchor, so the only honest observable is the
+# forger's own log timestamps. Hence producer-only, and stale if it is quiet --
+# which is why the JSON names its source rather than claiming to be the clock.
+cmd_clock() {
+  local run; run=$(resolve_running "${1:-}")
+  local m; m=$(require_manifest "$run")
+  fork_running "$run" || die "the fork at $run is not running; its clock is only
+  observable while it forges"
+  local slot
+  slot=$(forger_clock_slot "$run") || die "no 'Chain extended' line in $(container_for "$run")'s
+  log yet -- wait for the first forged block"
+  CLOCK_SLOT=$slot python3 -c "$(genesis_py)
+import json, os
+m = json.load(open(sys.argv[2]))
+slot = int(os.environ['CLOCK_SLOT'])
+print(json.dumps({
+  'slot': slot,
+  'time': slot_to_time(slot).strftime('%Y-%m-%dT%H:%M:%SZ'),
+  'epoch': epoch_of(slot),
+  'rate': m['clock']['rate'],
+  'kesPeriod': kes_of(slot),
+  'source': 'forger-last-chain-extended',
+}, indent=2))
+" "$run/chain/shelley-genesis.json" "$m"
+}
+
 # ---------------------------------------------------------------- dispatch
 
 cmd=${1:-}; shift || true
@@ -1040,9 +1256,12 @@ case "$cmd" in
   stop)   cmd_stop "$@" ;;
   status) cmd_status "$@" ;;
   warp)   cmd_warp "$@" ;;
+  rate)   cmd_rate "$@" ;;
   reset)  cmd_reset "$@" ;;
   list)   cmd_list "$@" ;;
   follow) cmd_follow "$@" ;;
+  ogmios) cmd_ogmios "$@" ;;
+  clock)  cmd_clock "$@" ;;
   ""|-h|--help|help) usage 0 ;;
   *) echo "devnet fork: unknown subcommand '$cmd'" >&2; usage ;;
 esac

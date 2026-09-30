@@ -1,4 +1,13 @@
 networks:
+  # Shared bridge for fork sidecars (ogmios, and later the provider/explorer).
+  # External on purpose: each fork runs in its own compose project, so a network
+  # declared here would be created once per project -- one bridge per fork,
+  # which is exactly what a shared entry point must not have. Created on demand
+  # by scripts/devnet-fork.
+  devnet-forks:
+    name: devnet-forks
+    external: true
+
   hydranet:
     driver: bridge
     ipam:
@@ -127,6 +136,38 @@ services:
       "--shelley-kes-key", "/rundir/chain/kes.skey",
       "--shelley-vrf-key", "/rundir/chain/vrf.skey",
       "--shelley-operational-certificate", "/rundir/chain/node.opcert"
+    ]
+    volumes:
+      - ${ISOLATED_RUN_DIR:-/var/empty}:/rundir
+      - ${ISOLATED_RUN_DIR:-/var/empty}/ipc:/ipc
+
+  # Per-fork ogmios sidecar. Reaches its fork over the Unix socket in
+  # <run dir>/ipc -- NOT over the node's network namespace, which is `none` and
+  # stays that way (phase-8 isolation is untouched however many forks run).
+  # It publishes no host port; it joins the shared devnet-forks bridge and is
+  # addressed by container name there, so one entry point can serve many forks.
+  # Started via scripts/devnet-fork ogmios, which sets ISOLATED_RUN_DIR and
+  # FORK_OGMIOS_NAME the same way scripts/isolated-node sets the node's.
+  ogmios-fork:
+    profiles: ["fork-sidecar"]
+    image: ${DEVNET_IMAGE:-ghcr.io/cryptophonic/cardano-node-ogmios:v7.0.0_11.1.2-custom-cb30ce58-faketime}
+    # x86-64 image (custom cardano-node build); on arm64 hosts this runs under emulation
+    platform: linux/amd64
+    container_name: ${FORK_OGMIOS_NAME:-devnet-fork-ogmios}
+    # Discovery is by label, as with the producer: tooling asks docker which
+    # sidecars are up rather than guessing from names.
+    labels:
+      devnet.fork: ogmios
+      devnet.fork.run: ${ISOLATED_RUN_DIR:-}
+    user: $MY_UID:$MY_GID
+    entrypoint: /bin/ogmios
+    restart: on-failure
+    networks:
+      - devnet-forks
+    command: [
+      "--host", "0.0.0.0",
+      "--node-socket", "/ipc/node.socket",
+      "--node-config", "/rundir/chain/config.json"
     ]
     volumes:
       - ${ISOLATED_RUN_DIR:-/var/empty}:/rundir

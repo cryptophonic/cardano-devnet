@@ -39,6 +39,11 @@ The scripts carry their own usage notes in their headers — read those first:
   its socket. Fully isolated: the Unix socket is the only way in or out.
 - `scripts/set-faketime` — shift a run's clock so a stale DB stays inside the
   ledger's forecast horizon.
+- `src/fork/` — the fork SDK: `openFork(name)` gives a `Fork` with `tip()`,
+  `now()`, `warpTo()`, `setRate()` and `impersonate(address)`, over a Blaze
+  provider backed by the fork's own ogmios sidecar
+  (`devnet fork ogmios start <n>`). See `src/fork/fork.mjs` for the usage sketch
+  and `test/fork-sdk-*.mjs` for runnable examples.
 
 Conventions that matter:
 
@@ -55,7 +60,7 @@ Conventions that matter:
 
 - `scripts/` — all entry points (`start-cardano-devnet`, `fund`, `monitor`,
   `indexer`, `explorer`, fork-mode tooling).
-- `src/` — node-side JS: monitor, indexer, fund, Blaze/Lucid provider.
+- `src/` — node-side JS: monitor, indexer, fund, Blaze/Lucid provider, fork SDK.
 - `explorer/` — SvelteKit web explorer (its own `npm install`).
 - `config/` — genesis, credentials and node config for the local devnet.
 - `docker/`, `docker-compose.yml` — image build and service definitions.
