@@ -323,6 +323,53 @@ export class Fork {
     return extractChain(this, opts)
   }
 
+  // ------------------------------------------------------------ governance
+
+  /**
+   * Propose a governance action. Pure CLI wrapper -- unlike generate/replay,
+   * building governance certs/votes needs no Blaze at all, so there is no
+   * matching .mjs module, just `devnet fork propose` (scripts/devnet-fork).
+   * @param {'info'|'param-change'|'no-confidence'|'update-committee'} type
+   * @param {string[]} [flags] extra cardano-cli flags for that action type,
+   *   e.g. ['--min-pool-cost', '123456789']
+   * @returns {Promise<{ action: string, actionFile: string }>} action is "TXID#IX"
+   */
+  async propose(type, flags = []) {
+    const out = await devnetFork(['propose', this.name, type, ...flags])
+    const action = out.match(/^proposed \S+: action (\S+)/m)?.[1]
+    const actionFile = out.match(/^\s*action file: (\S+)/m)?.[1]
+    if (!action) throw new Error(`propose: could not find an action id in:\n${out}`)
+    return { action, actionFile }
+  }
+
+  /**
+   * Vote on a governance action as a group of DReps, SPOs or the committee.
+   * @param {string} action "TXID#IX"
+   * @param {'drep:all'|`drep:top:${number}`|'spo:all'|`spo:top:${number}`|'cc'} as
+   * @param {'yes'|'no'|'abstain'} choice
+   * @param {{ ccScripts?: string }} [opts]
+   * @returns {Promise<string>} the voting transaction's id
+   */
+  async vote(action, as, choice, { ccScripts } = {}) {
+    const args = ['vote', this.name, '--action', action, '--as', as, `--${choice}`]
+    if (ccScripts) args.push('--cc-scripts', ccScripts)
+    const out = await devnetFork(args)
+    return out.trim().split('\n').pop()
+  }
+
+  /**
+   * NoConfidence, voted through with enough DReps/SPOs to clear both
+   * thresholds, then warped across the boundary -- so a later `propose`
+   * no longer needs any committee vote to ratify (fork-mode-governance.md).
+   * @param {{ drepTop?: number, spoTop?: number, onOutput?: (chunk: string) => void }} [opts]
+   */
+  async replaceCommittee({ drepTop, spoTop, onOutput } = {}) {
+    const args = ['replace-committee', this.name]
+    if (drepTop !== undefined) args.push('--drep-top', String(drepTop))
+    if (spoTop !== undefined) args.push('--spo-top', String(spoTop))
+    return devnetFork(args, { onOutput, timeout: 0 })
+  }
+
   async close() {
     await this.provider.close()
   }

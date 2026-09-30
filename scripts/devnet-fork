@@ -20,6 +20,9 @@
 #   devnet fork generate <n> --tps T --duration D [--shape transfer|fanout|mixed]
 #   devnet fork extract <source-fork> --from-slot S --to-slot T --out <file>
 #   devnet fork replay <n> --source ogmios:<url>|file:<path> --from-slot S --to-slot T
+#   devnet fork propose <n> info|param-change|no-confidence|update-committee [flags...]
+#   devnet fork vote <n> --action TXID#IX --as drep:all|drep:top:K|spo:all|spo:top:K|cc --yes|--no|--abstain
+#   devnet fork replace-committee <n>   # NoConfidence + warp, so later actions skip the committee gate
 #   devnet fork reset <n>              # back to the fork point
 #   devnet fork list
 #   devnet fork follow <manifest path> # start a follower beside the producer
@@ -1256,6 +1259,514 @@ cmd_replay() {
   exec node "$DEVNET_ROOT/src/fork/replay.mjs" "$@"
 }
 
+# ------------------------------------------------------------ governance
+
+# Fixed and never fetched (no --check-anchor-data is ever passed, so this URL
+# is a label, not a request); a real anchor would need internet access this
+# isolated container deliberately doesn't have.
+GOV_ANCHOR_URL="https://fork-mode.invalid/anchor"
+GOV_ANCHOR_HASH="db30609f1dd49a54376093df0e027ef61c0e24e14e98083e25ab94071006380f"
+
+# Every governance command here works OFFLINE where cardano-cli allows it --
+# action/vote creation, transaction build-raw, calculate-min-fee, sign -- using
+# the HOST $CLI binary directly on files under <run>/gov, never the
+# containerized `isolated-node cli`. This is not an optimization: the god key
+# file is deliberately never copied into a run directory (see cmd_create), so
+# a container that only mounts /rundir cannot see it at all, and `transaction
+# sign` needs to read it. Only the steps that need the live node -- querying
+# UTxOs/pparams/stake distributions, and the final submit -- go through
+# `isolated-node cli`, which does have the socket.
+gov_fund_address() {
+  local run=$1 addr=""
+  if [ -s "$run/seeds.json" ]; then
+    addr=$(python3 -c "
+import json
+s = json.load(open('$run/seeds.json'))
+print(s[0]['address'] if s else '')
+" 2>/dev/null)
+  fi
+  echo "${addr:-addr_test1vp8cprhse9pnnv7f4l3n6pj0afq2hjm6f7r2205dz0583egagfjah}"
+}
+
+# Prints "<txin> <lovelace>" for the biggest lovelace-only UTxO at an address,
+# optionally excluding one already spoken for (so a proposal's funding input
+# and its collateral input, both drawn from the same whale, are never the
+# same UTxO).
+gov_utxo_select() {
+  local run=$1 magic=$2 addr=$3 exclude=${4:-}
+  "$SCRIPTS/isolated-node" cli --run "$run" conway query utxo --address "$addr" \
+    --testnet-magic "$magic" --output-json 2>/dev/null | python3 -c "
+import json, sys
+utxos = json.load(sys.stdin)
+utxos.pop('$exclude', None)
+if not utxos:
+    sys.exit('no utxo')
+best = max(utxos.items(), key=lambda kv: kv[1]['value'].get('lovelace', 0))
+print(best[0], best[1]['value']['lovelace'])
+"
+}
+
+# Register a stake credential for the deposit-return / reward account a
+# proposal or stake-pool-adjacent action needs. Reuses the god key's OWN
+# payment key hash as the stake credential -- it is not a real stake key for
+# anyone, but the god key satisfies its registration certificate's witness
+# requirement exactly like any other vkey, and this avoids minting new key
+# material nobody would otherwise hold (fork-mode-god-key.md's whole premise).
+ensure_gov_account_registered() {
+  local run=$1 magic=$2 fund=$3 keyhash=$4
+  local addr
+  addr=$("$CLI" conway stake-address build --stake-key-hash "$keyhash" --testnet-magic "$magic")
+  local info
+  info=$("$SCRIPTS/isolated-node" cli --run "$run" conway query stake-address-info \
+           --address "$addr" --testnet-magic "$magic" --output-json 2>/dev/null)
+  [ "$info" != "[]" ] && [ -n "$info" ] && return 0
+
+  echo "registering deposit-return account $addr ($keyhash)..."
+  local deposit
+  deposit=$("$SCRIPTS/isolated-node" cli --run "$run" conway query protocol-parameters \
+              --testnet-magic "$magic" 2>/dev/null | python3 -c "import json,sys;print(json.load(sys.stdin)['stakeAddressDeposit'])")
+  local gdir="$run/gov"; mkdir -p "$gdir"
+  local cert="$gdir/register-$$.cert"
+  "$CLI" conway stake-address registration-certificate --stake-key-hash "$keyhash" \
+    --key-reg-deposit-amt "$deposit" --out-file "$cert"
+  local txid
+  txid=$(gov_submit "$run" "$magic" "$fund" "$deposit" --certificate-file "$cert")
+  echo "  $txid"
+}
+
+# Build, fee (2-pass: fee=0 to size it, then the real fee), sign with the god
+# key and submit a transaction spending the biggest UTxO at $fund, change back
+# to itself, carrying whatever extra `transaction build-raw` flags the caller
+# supplies (a --proposal-file, one or more --vote-file, a --certificate-file).
+# Prints the resulting transaction id on success.
+gov_submit() {
+  local run=$1 magic=$2 fund=$3 deposit=$4; shift 4
+  local m; m=$(manifest_of "$run")
+  local godkey; godkey=$(mget "$m" godKeyPath)
+  local gdir="$run/gov"; mkdir -p "$gdir"
+  local tag=$$-$RANDOM
+
+  "$SCRIPTS/isolated-node" cli --run "$run" conway query protocol-parameters \
+    --testnet-magic "$magic" --out-file /rundir/gov/pparams.json >/dev/null
+
+  local sel; sel=$(gov_utxo_select "$run" "$magic" "$fund") \
+    || die "gov: no UTxO at $fund to fund this transaction"
+  read -r txin lovelace <<<"$sel"
+
+  local body="$gdir/body-$tag.json"
+  local change=$(( lovelace - deposit ))
+  [ "$change" -gt 0 ] || die "gov: $fund ($lovelace lovelace) can't cover the $deposit lovelace deposit"
+  # --protocol-params-file is required on build-raw itself whenever a script
+  # is attached (script_data_hash needs the cost models), not just on
+  # calculate-min-fee -- verified live, cardano-cli refuses otherwise.
+  "$CLI" conway transaction build-raw --tx-in "$txin" --tx-out "${fund}+${change}" \
+    --protocol-params-file "$gdir/pparams.json" --fee 0 "$@" --out-file "$body" \
+    || die "gov: transaction build-raw failed (see the error above)"
+
+  local fee
+  fee=$("$CLI" conway transaction calculate-min-fee --tx-body-file "$body" \
+    --protocol-params-file "$gdir/pparams.json" --testnet-magic "$magic" \
+    --witness-count 1 --tx-in-count 1 --tx-out-count 1) \
+    || die "gov: transaction calculate-min-fee failed (see the error above)"
+  fee=$(python3 -c "import json,sys;print(json.load(sys.stdin)['fee'])" <<<"$fee")
+  [ -n "$fee" ] || die "gov: could not calculate a fee for $body"
+
+  change=$(( lovelace - deposit - fee ))
+  [ "$change" -gt 0 ] || die "gov: $fund ($lovelace lovelace) can't cover deposit ($deposit) + fee ($fee)"
+  "$CLI" conway transaction build-raw --tx-in "$txin" --tx-out "${fund}+${change}" \
+    --protocol-params-file "$gdir/pparams.json" --fee "$fee" "$@" --out-file "$body" \
+    || die "gov: transaction build-raw (final pass) failed (see the error above)"
+
+  local signed="$gdir/signed-$tag.json"
+  "$CLI" conway transaction sign --tx-body-file "$body" --signing-key-file "$godkey" \
+    --testnet-magic "$magic" --out-file "$signed" \
+    || die "gov: transaction sign failed (see the error above)"
+
+  # `isolated-node cli`'s own exit code is not trustworthy enough to lean on
+  # `set -e` for here -- verified live: a rejected submission printed its
+  # ledger error and the wrapper still returned 0. Check explicitly.
+  if ! "$SCRIPTS/isolated-node" cli --run "$run" conway transaction submit \
+         --tx-file "/rundir/gov/$(basename "$signed")" --testnet-magic "$magic" >&2; then
+    die "gov: submission of $signed failed (see the ledger error above)"
+  fi
+
+  local txid; txid=$("$CLI" conway transaction txid --tx-file "$signed" | python3 -c "import json,sys;print(json.load(sys.stdin)['txhash'])")
+
+  # Sequential governance steps often spend from the same funding address
+  # moments apart (e.g. register-account then propose); without waiting, the
+  # next gov_submit's UTxO query still sees the just-spent input and collides
+  # with it in the mempool -- verified live ("All inputs are spent. ...
+  # probably already been included" on a submission that was, per its own
+  # printed error, in fact rejected). Wait for this tx's own change output to
+  # confirm before handing control back.
+  local deadline=$(( SECONDS + 90 ))
+  while [ "$SECONDS" -lt "$deadline" ]; do
+    local seen
+    seen=$("$SCRIPTS/isolated-node" cli --run "$run" conway query utxo \
+             --tx-in "${txid}#0" --testnet-magic "$magic" --output-json 2>/dev/null)
+    [ "$seen" != "{}" ] && [ -n "$seen" ] && break
+    sleep 2
+  done
+
+  echo "$txid"
+}
+
+# devnet fork propose <n> info|param-change|no-confidence|update-committee [action flags...]
+#
+# Extra flags pass straight through to the matching `cardano-cli conway
+# governance action create-*`/`update-committee` -- e.g. `--min-pool-cost
+# 123456789` for param-change, or `--add-cc-cold-script-hash H --epoch E
+# --threshold 2/3` for update-committee. The boilerplate every action needs
+# (deposit, deposit-return account, anchor) is handled here; a ParameterChange
+# additionally requires the constitution's guardrails script to be declared
+# AND actually run as a PlutusV3 witness with collateral
+# (fork-mode-rate-and-epoch.md 9d finding #2) -- also handled here.
+cmd_propose() {
+  local name=${1:?usage: devnet fork propose <n> info|param-change|no-confidence|update-committee [action flags...]}
+  local type=${2:?usage: devnet fork propose <n> <type> [action flags...]}
+  shift 2
+  local run; run=$(resolve_run "$name")
+  local m; m=$(require_manifest "$name")
+  fork_running "$run" || die "fork '$name' is not running:
+    devnet fork start $name"
+  local magic; magic=$(mget "$m" networkMagic)
+  local godhash; godhash=$(mget "$m" godKeyHash)
+  local fund; fund=$(gov_fund_address "$run")
+
+  ensure_gov_account_registered "$run" "$magic" "$fund" "$godhash"
+
+  local cli_action prevkey
+  case "$type" in
+    info)              cli_action=create-info ;;
+    param-change)      cli_action=create-protocol-parameters-update; prevkey=PParamUpdate ;;
+    no-confidence)     cli_action=create-no-confidence; prevkey=Committee ;;
+    update-committee)  cli_action=update-committee; prevkey=Committee ;;
+    *) die "propose: unknown type '$type' (info|param-change|no-confidence|update-committee)" ;;
+  esac
+
+  local gdir="$run/gov"; mkdir -p "$gdir"
+  local govdeposit
+  govdeposit=$("$SCRIPTS/isolated-node" cli --run "$run" conway query protocol-parameters \
+    --testnet-magic "$magic" 2>/dev/null | python3 -c "import json,sys;print(json.load(sys.stdin)['govActionDeposit'])")
+
+  local constscript="" scripthash="" action_extra=()
+
+  # Governance actions that touch protocol state chain off the LAST action of
+  # their own group (PParamUpdate, Committee, Constitution, HardFork) --
+  # omitting this when one already exists is rejected outright
+  # (InvalidPrevGovActionId, verified live). Info actions have no group.
+  if [ -n "${prevkey:-}" ]; then
+    local prev
+    prev=$("$SCRIPTS/isolated-node" cli --run "$run" conway query gov-state --testnet-magic "$magic" 2>/dev/null \
+      | python3 -c "
+import json, sys
+p = json.load(sys.stdin)['nextRatifyState']['nextEnactState']['prevGovActionIds'].get('$prevkey')
+print(f\"{p['txId']} {p['govActionIx']}\" if p else '')
+")
+    if [ -n "$prev" ]; then
+      read -r prevtx previx <<<"$prev"
+      action_extra+=(--prev-governance-action-tx-id "$prevtx" --prev-governance-action-index "$previx")
+    fi
+  fi
+  if [ "$type" = param-change ]; then
+    constscript=${GOV_GUARDRAILS_SCRIPT:-$HOME/Downloads/guardrails-script.plutus}
+    [ -f "$constscript" ] || die "propose: no guardrails script at $constscript -- a ParameterChange
+  needs the constitution's PlutusV3 script; set GOV_GUARDRAILS_SCRIPT=<path>"
+    scripthash=$("$CLI" hash script --script-file "$constscript")
+    action_extra+=(--constitution-script-hash "$scripthash")
+  fi
+
+  local actionfile="$gdir/action-$type-$$.json"
+  "$CLI" conway governance action "$cli_action" --testnet \
+    --governance-action-deposit "$govdeposit" \
+    --deposit-return-stake-key-hash "$godhash" \
+    --anchor-url "$GOV_ANCHOR_URL" --anchor-data-hash "$GOV_ANCHOR_HASH" \
+    "${action_extra[@]}" "$@" --out-file "$actionfile"
+
+  local submit_extra=(--proposal-file "$actionfile")
+  if [ "$type" = param-change ]; then
+    # Collateral must be a UTxO distinct from the one funding the tx itself.
+    local funded; funded=$(gov_utxo_select "$run" "$magic" "$fund")
+    local fundedtxin=${funded%% *}
+    local colsel; colsel=$(gov_utxo_select "$run" "$magic" "$fund" "$fundedtxin") \
+      || die "propose: $fund needs a second UTxO to use as collateral"
+    local colin=${colsel%% *}
+    submit_extra+=(--proposal-script-file "$constscript" --proposal-redeemer-value "{}" \
+                   --proposal-execution-units "(1000000000,1000000)" --tx-in-collateral "$colin")
+  fi
+
+  local txid
+  txid=$(gov_submit "$run" "$magic" "$fund" "$govdeposit" "${submit_extra[@]}")
+  echo "proposed $type: action $txid#0"
+  echo "  action file: $actionfile"
+}
+
+# devnet fork vote <n> --action <txid>#<index> --as drep:all|drep:top:K|spo:all|spo:top:K|cc|cc-keys:H1,H2,... --yes|--no|--abstain [--cc-scripts <dir>]
+#
+# DRep/SPO voters are enumerated live from `query drep-stake-distribution` /
+# `spo-stake-distribution` -- the "always abstain"/"always no confidence"
+# entries are dropped, they are not votable credentials. `cc` requires
+# --cc-scripts <dir> holding the committee members' own native/Plutus
+# scripts; each is hashed and checked against the CURRENT committee's hot
+# credentials (`query committee-state`) before anything is submitted, and any
+# that don't match are named and refused (fork-mode-prompts.md's own
+# requirement) -- there is no god-key shortcut here, script witnesses are the
+# one thing it does not substitute for (fork-mode-god-key.md). `cc-keys:H1,H2`
+# is for a KEY-HASH committee this operator installed themselves (see
+# `devnet fork replace-committee`) -- the god key satisfies these directly,
+# same as any other key-hash witness.
+cmd_vote() {
+  local name=${1:?usage: devnet fork vote <n> --action TXID#IX --as drep:all|drep:top:K|spo:all|spo:top:K|cc|cc-keys:H1,H2 --yes|--no|--abstain}
+  shift
+  local action="" as="" choice="" cc_scripts=""
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --action) action=${2:?}; shift 2 ;;
+      --as) as=${2:?}; shift 2 ;;
+      --yes|--no|--abstain) choice=$1; shift ;;
+      --cc-scripts) cc_scripts=${2:?}; shift 2 ;;
+      *) die "vote: unknown argument $1" ;;
+    esac
+  done
+  [ -n "$action" ] && [ -n "$as" ] && [ -n "$choice" ] || \
+    die "usage: devnet fork vote <n> --action TXID#IX --as <voters> --yes|--no|--abstain"
+  local actiontx=${action%%#*} actionidx=${action##*#}
+
+  local run; run=$(resolve_run "$name")
+  local m; m=$(require_manifest "$name")
+  fork_running "$run" || die "fork '$name' is not running:
+    devnet fork start $name"
+  local magic; magic=$(mget "$m" networkMagic)
+  local fund; fund=$(gov_fund_address "$run")
+  local gdir="$run/gov"; mkdir -p "$gdir"
+
+  local vote_flags=() voters=()
+  case "$as" in
+    drep:all|drep:top:*)
+      local k=${as#drep:top:}; [ "$as" = "drep:all" ] && k=999999
+      while IFS= read -r h; do voters+=("drep:$h"); done < <(
+        "$SCRIPTS/isolated-node" cli --run "$run" conway query drep-stake-distribution \
+          --all-dreps --testnet-magic "$magic" 2>/dev/null | python3 -c "
+import json, sys
+d = json.load(sys.stdin)
+d.pop('drep-alwaysAbstain', None); d.pop('drep-alwaysNoConfidence', None)
+for k, _ in sorted(d.items(), key=lambda kv: -kv[1])[:$k]:
+    print(k.replace('drep-keyHash-', ''))
+")
+      ;;
+    spo:all|spo:top:*)
+      local k=${as#spo:top:}; [ "$as" = "spo:all" ] && k=999999
+      while IFS= read -r h; do voters+=("spo:$h"); done < <(
+        "$SCRIPTS/isolated-node" cli --run "$run" conway query spo-stake-distribution \
+          --all-spos --testnet-magic "$magic" 2>/dev/null | python3 -c "
+import json, sys
+d = sorted(json.load(sys.stdin), key=lambda x: -x[1])[:$k]
+for pid, _, _ in d:
+    print(pid)
+")
+      ;;
+    cc)
+      [ -n "$cc_scripts" ] || die "vote: --as cc needs --cc-scripts <dir>"
+      local committee
+      committee=$("$SCRIPTS/isolated-node" cli --run "$run" conway query committee-state \
+        --testnet-magic "$magic" --output-json 2>/dev/null)
+      local f hash missing=() matched=0
+      for f in "$cc_scripts"/*; do
+        [ -f "$f" ] || continue
+        hash=$("$CLI" hash script --script-file "$f")
+        if echo "$committee" | python3 -c "
+import json, sys
+c = json.load(sys.stdin)
+sys.exit(0 if any('scriptHash-$hash' in k for k in c.get('committee', {})) else 1)
+" 2>/dev/null; then
+          voters+=("cc:$hash"); matched=$((matched + 1))
+        else
+          missing+=("$f ($hash)")
+        fi
+      done
+      [ "$matched" -gt 0 ] || die "vote: none of the scripts in $cc_scripts match a current committee
+  hot credential. Checked: ${missing[*]}"
+      [ "${#missing[@]}" -eq 0 ] || echo "vote: ${#missing[@]} script(s) did not match a current committee credential, skipped: ${missing[*]}"
+      ;;
+    cc-keys:*)
+      local hashes=${as#cc-keys:} h
+      IFS=',' read -ra hashes <<<"$hashes"
+      for h in "${hashes[@]}"; do voters+=("cck:$h"); done
+      ;;
+    *) die "vote: --as must be drep:all|drep:top:K|spo:all|spo:top:K|cc|cc-keys:H1,H2, got '$as'" ;;
+  esac
+  [ "${#voters[@]}" -gt 0 ] || die "vote: no voters found for --as $as"
+
+  local i=0 v kind hash votefile
+  for v in "${voters[@]}"; do
+    kind=${v%%:*}; hash=${v#*:}
+    votefile="$gdir/vote-$$-$i.json"
+    case "$kind" in
+      drep) "$CLI" conway governance vote create "$choice" \
+              --governance-action-tx-id "$actiontx" --governance-action-index "$actionidx" \
+              --drep-key-hash "$hash" --out-file "$votefile" ;;
+      spo)  "$CLI" conway governance vote create "$choice" \
+              --governance-action-tx-id "$actiontx" --governance-action-index "$actionidx" \
+              --stake-pool-id "$hash" --out-file "$votefile" ;;
+      cc)   "$CLI" conway governance vote create "$choice" \
+              --governance-action-tx-id "$actiontx" --governance-action-index "$actionidx" \
+              --cc-hot-script-hash "$hash" --out-file "$votefile" ;;
+      cck)  "$CLI" conway governance vote create "$choice" \
+              --governance-action-tx-id "$actiontx" --governance-action-index "$actionidx" \
+              --cc-hot-key-hash "$hash" --out-file "$votefile" ;;
+    esac
+    vote_flags+=(--vote-file "$votefile")
+    i=$((i + 1))
+  done
+
+  echo "casting ${#voters[@]} $kind vote(s) ($choice) on $action..."
+  local txid
+  txid=$(gov_submit "$run" "$magic" "$fund" 0 "${vote_flags[@]}")
+  echo "  $txid"
+}
+
+# Warp to the start of the NEXT epoch after the current tip. Ratification
+# happens AT a boundary crossing; a change like committee removal or a
+# ParameterChange then only fully APPLIES at the boundary AFTER that one --
+# a real one-epoch lag found live (fork-mode-governance.md 14d) -- so most
+# governance flows here need this called twice in a row, not once.
+gov_warp_next_epoch() {
+  local run=$1 magic=$2 epochlen=$3
+  local tip; tip=$(live_tip_slot "$magic" "$run")
+  local target=$(( (tip / epochlen + 1) * epochlen + 1 ))
+  cmd_warp "$(basename "$run")" --to-slot "$target"
+}
+
+# devnet fork replace-committee <n> [--drep-top K] [--spo-top K] [--size N]
+#
+# The full, working path to enacting ANYTHING past preview's real,
+# script-credentialed committee. Two wrong turns before this worked, both
+# instructive (see fork-mode-governance.md 14f):
+#
+# 1. First cut assumed NoConfidence alone was enough, since it makes the
+#    "committee approved" ratification condition vacuous -- WRONG, per a
+#    from-source read of cardano-ledger's Conway ratification rule
+#    (Rules/Ratify.hs, votingCommitteeThresholdInternal): with no committee
+#    (or one below committeeMinSize), most action types get
+#    `NoVotingThreshold`, which `committeeAccepted` reads as an
+#    unconditional NO, not "vacuously yes". Only NoConfidence and
+#    UpdateCommittee get `NoVotingAllowed` (a zero threshold that
+#    auto-passes) -- so clearing the committee first just strands you: no
+#    OTHER action can ever enact again until a real committee exists.
+# 2. Second cut skipped NoConfidence (the real committee's own vote on an
+#    UpdateCommittee is ALSO `NoVotingAllowed` -- it cannot veto its own
+#    replacement) and proposed one combined "remove the real members, add
+#    new key-hash ones" action directly -- right idea, but every new
+#    member's `--epoch` (expiry) was set to 999999999, wildly past genesis's
+#    `committeeMaxTermLength` (365). cardano-cli does not validate that
+#    client-side, and the mempool accepts the resulting CBOR without
+#    complaint -- it just silently never ratifies. No error anywhere.
+#
+# What actually works: ONE `update-committee` action, in the SAME
+# transaction, removing every current member (whatever credential type they
+# happen to be) and adding N new GOD-KEY-hash members with a SANE expiry
+# (current epoch + up to committeeMaxTermLength). Vote DRep + SPO yes at
+# whatever threshold currently applies (committeeNormal if a committee
+# exists, committeeNoConfidence if not -- either way, the calibrated
+# drep-top/spo-top counts clear both). Warp two boundaries (ratify, then
+# apply). Authorize a hot key for each new member. Done -- no NoConfidence,
+# no empty-committee limbo.
+#
+# The new members' hashes are random and arbitrary: fork mode's god key
+# satisfies ANY required key-hash witness regardless of which hash was
+# nominally expected (fork-mode-god-key.md), so nothing about them needs to
+# be real or held by anyone -- they just need to be N distinct values, and
+# hot == cold here for the same reason.
+#
+# Off by default -- run explicitly, and it changes the fork's simulated
+# governance state, never the real chain's.
+#
+# --drep-top/--spo-top default to counts calibrated against this host's own
+# preview snapshot (7 DReps clear 67% of non-abstain DRep stake; 19 pools
+# clear 51% of pool stake, fork-mode-governance.md) -- a real snapshot with
+# different delegation may need different counts. --size defaults to the
+# fork's own live `committeeMinSize` (read from `query gov-state`).
+cmd_replace_committee() {
+  local name=${1:?usage: devnet fork replace-committee <n>}; shift || true
+  local drep_top=7 spo_top=19 size=""
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --drep-top) drep_top=${2:?}; shift 2 ;;
+      --spo-top) spo_top=${2:?}; shift 2 ;;
+      --size) size=${2:?}; shift 2 ;;
+      *) die "replace-committee: unknown argument $1" ;;
+    esac
+  done
+  local run; run=$(resolve_run "$name")
+  local m; m=$(require_manifest "$name")
+  fork_running "$run" || die "fork '$name' is not running:
+    devnet fork start $name"
+  local magic; magic=$(mget "$m" networkMagic)
+  local epochlen; epochlen=$(mget "$m" genesis.epochLength)
+
+  local gs; gs=$("$SCRIPTS/isolated-node" cli --run "$run" conway query gov-state --testnet-magic "$magic" 2>/dev/null)
+  [ -n "$size" ] || size=$(echo "$gs" | python3 -c "import json,sys;print(json.load(sys.stdin)['currentPParams']['committeeMinSize'])")
+  local maxterm; maxterm=$(echo "$gs" | python3 -c "import json,sys;print(json.load(sys.stdin)['currentPParams']['committeeMaxTermLength'])")
+  local curepoch; curepoch=$("$SCRIPTS/isolated-node" cli --run "$run" conway query tip --testnet-magic "$magic" 2>/dev/null | python3 -c "import json,sys;print(json.load(sys.stdin)['epoch'])")
+  local expiry=$(( curepoch + (maxterm < 300 ? maxterm : 300) ))
+
+  local remove_flags=()
+  while IFS= read -r line; do
+    [ -n "$line" ] && remove_flags+=($line)
+  done < <(echo "$gs" | python3 -c "
+import json, sys
+c = json.load(sys.stdin).get('committee') or {}
+for k in c.get('members', {}):
+    kind, h = k.split('-', 1)
+    flag = '--remove-cc-cold-script-hash' if kind == 'scriptHash' else '--remove-cc-cold-verification-key-hash'
+    print(f'{flag} {h}')
+")
+
+  local hashes=() add_flags=() i
+  for ((i = 0; i < size; i++)); do
+    local h; h=$(head -c28 /dev/urandom | xxd -p)
+    hashes+=("$h")
+    add_flags+=(--add-cc-cold-verification-key-hash "$h" --epoch "$expiry")
+  done
+
+  echo "== proposing UpdateCommittee: remove $(( ${#remove_flags[@]} / 2 )) real member(s), add $size new god-key-hash member(s) (expiry epoch $expiry) =="
+  local out; out=$(cmd_propose "$name" update-committee "${remove_flags[@]}" "${add_flags[@]}" --threshold 2/3)
+  echo "$out"
+  local action; action=$(echo "$out" | sed -n 's/^proposed update-committee: action //p')
+
+  echo "== voting DRep + SPO yes =="
+  cmd_vote "$name" --action "$action" --as "drep:top:$drep_top" --yes
+  cmd_vote "$name" --action "$action" --as "spo:top:$spo_top" --yes
+
+  echo "== warping two boundaries: ratifies at the first, applies at the second =="
+  gov_warp_next_epoch "$run" "$magic" "$epochlen"
+  gov_warp_next_epoch "$run" "$magic" "$epochlen"
+
+  local newsize; newsize=$("$SCRIPTS/isolated-node" cli --run "$run" conway query committee-state \
+    --testnet-magic "$magic" --output-json 2>/dev/null | python3 -c "import json,sys;print(len(json.load(sys.stdin)['committee']))")
+  [ "$newsize" = "$size" ] || die "replace-committee: expected $size committee member(s) after two boundaries, found $newsize.
+  Check 'query committee-state'/'query gov-state' by hand -- a common cause is
+  the new expiry (epoch $expiry) exceeding committeeMaxTermLength ($maxterm)."
+
+  echo "== authorizing a hot key for each new cold member (hot == cold here; both are"
+  echo "   satisfied by the god key regardless) =="
+  local h fund; fund=$(gov_fund_address "$run")
+  local cert_flags=()
+  for h in "${hashes[@]}"; do
+    local cert="$run/gov/hot-auth-$h.cert"
+    "$CLI" conway governance committee create-hot-key-authorization-certificate \
+      --cold-verification-key-hash "$h" --hot-verification-key-hash "$h" --out-file "$cert"
+    cert_flags+=(--certificate-file "$cert")
+  done
+  gov_submit "$run" "$magic" "$fund" 0 "${cert_flags[@]}" >/dev/null
+
+  local joined; joined=$(IFS=,; echo "${hashes[*]}")
+  echo
+  echo "committee replaced: $size key-hash member(s), threshold 2/3, hot keys authorized."
+  echo "Vote as this committee on any FUTURE proposal with:"
+  echo "  devnet fork vote $name --action <TXID#IX> --as cc-keys:$joined --yes"
+}
+
 # ---------------------------------------------------------------- reset
 
 cmd_reset() {
@@ -1509,6 +2020,9 @@ case "$cmd" in
   generate) cmd_generate "$@" ;;
   extract) cmd_extract "$@" ;;
   replay) cmd_replay "$@" ;;
+  propose) cmd_propose "$@" ;;
+  vote) cmd_vote "$@" ;;
+  replace-committee) cmd_replace_committee "$@" ;;
   reset)  cmd_reset "$@" ;;
   list)   cmd_list "$@" ;;
   follow) cmd_follow "$@" ;;
