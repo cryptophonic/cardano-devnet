@@ -123,7 +123,92 @@ absorbed the forward jump and returned to zero lag.
 
 **PASS.** The clock is a signal, not an immutable property of the process.
 
-## Limits of this evidence
+## 10e. Two nodes synchronised by writing both stamps after startup
+
+The point of the exercise. `run-s1` forging at x100 in file mode, `run-s1-follower`
+started afterwards in the forger's namespace, both in file mode, and the
+follower given **no lead at all** — the same anchor as the forger, which is the
+case the shipped `lead` exists to avoid.
+
+### The race, measured rather than estimated
+
+Container start times, from `docker inspect -f '{{.State.StartedAt}}'`:
+
+    devnet-node-isolated  2026-09-30T07:43:16.81992314Z
+    devnet-node-follower  2026-09-30T07:43:38.395169041Z
+
+**21.575 real seconds** of launch skew, which at x100 is **2157 slots**. The
+shipped `FOLLOWER_LEAD_SLOTS=400` cannot cover it. Observed skew agreed:
+
+    forger    clock 2026-09-21 23:34:21   tip 123377660
+    follower  clock 2026-09-21 22:58:43   tip 123375520
+
+2138 slots of clock skew, 2140 of tip gap — the follower cannot accept a block
+newer than its own clock, so it sat exactly as far behind as its clock did. The
+symptom is not a clean error: **346 `Net.PeerSelection.Selection.DemoteLocalAsynchronous`**
+warnings, i.e. it thrashed the connection to the one peer it has.
+
+### A rewrite RE-ANCHORS the multiplier — the formula that matters
+
+First correction attempt used `forger_anchor + skew`, i.e. moved the anchor
+forward by the measured 2138 slots plus margin. **It made things worse** (tip gap
+2140 -> 5040). Because in file mode the speed-up is re-anchored at the moment the
+file is read, not at process start:
+
+    clock_after_rewrite  ≈  new_anchor + rate * (t - t_rewrite)
+
+so writing a *larger anchor* throws the clock back to near that anchor instead of
+adding to where the clock already was. The follower's clock went
+22:58:43 -> ~22:44:52 and climbed again from there.
+
+The correct correction is therefore simpler than skew arithmetic: write the
+**forger's current faked clock** plus a margin. No knowledge of launch times, no
+rate multiplication, nothing to get wrong.
+
+    follower_anchor  =  forger's current clock + margin
+
+### Result
+
+Anchor set to the forger's live clock + 100 slots:
+
+    tip gap  5040 -> 40 slots   (2 blocks)
+    clocks within 29 s
+    follower's last blocks are the forger's exact hashes:
+      53369c83…:123392960 and 3b4a63c6…:123392980 in both
+
+313 of a 400-block sample identical by `hash:slot`; the 87 that differ are older
+blocks outside the forger's sample window, not divergence.
+
+### The margin is not cosmetic
+
+At +100 slots the follower stayed 2 blocks behind and churned at ~16/s. Raising
+the margin to +600:
+
+| margin | tip gap | DemoteLocalAsynchronous |
+| --- | --- | --- |
+| +100 slots | 40 slots | ~16/s |
+| +600 slots | **0 slots** | **~0.9/s** |
+
+At +600 the follower's clock ran ~295 s ahead of the forger's — the safe
+direction, and the ordinary case for any follower.
+
+**PASS.** Two nodes can be synchronised after they are both up, from a single
+observable (the forger's own log clock), with no dependence on how long either
+container took to start.
+
+### What this does not settle
+
+- The residual ~0.9/s churn at +600 is unexplained. It does not prevent sync
+  (gap 0, hashes identical) but it is not nothing, and it was not compared
+  against a non-accelerated run or against the env-var arm.
+- The margin was tuned on two data points on one host. It is a headroom figure,
+  not a derived constant.
+- The forger's clock was read from its last `Chain extended` line, which is
+  current only because a forger emits one every `BLOCK_EVERY` slots. That is not
+  a general way to read any node's clock — a quiet node's last line is stale, and
+  a short-lived child process is useless for this because it re-anchors.
+
+## Limits of this evidence (10a-10d)
 
 - The jump tested was **2000 slots**, ~20 real seconds at x100 and well inside
   the ~7.2 h forecast horizon. A jump large enough to clear the horizon is
@@ -137,9 +222,6 @@ absorbed the forward jump and returned to zero lag.
   route (`FAKETIME_SHARED`/`FAKETIME_FLSHM`, which is how the `faketime`
   wrapper does live adjustment) are untested.
 - Backwards jumps were not tested.
-- One node only. Whether two nodes in one namespace can be synchronised by
-  writing both stamps after startup — the actual point of the exercise — is the
-  next test, not this one.
 
 ## What this means for the tooling
 
