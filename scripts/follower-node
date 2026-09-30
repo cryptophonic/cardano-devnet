@@ -5,37 +5,40 @@
 # say -- rather than just the forger's own view of it.
 #
 # Usage:
-#   follower-node start <run dir>    # run dir from FOLLOWER=1 new-isolated-run
-#   follower-node stop
-#   follower-node logs [-f]
-#   follower-node cli <cardano-cli args...>   # cli against the FOLLOWER's socket
+#   follower-node start <run dir> [--of <forger run dir>]
+#   follower-node stop <run dir>
+#   follower-node logs <run dir> [-f]
+#   follower-node cli <run dir> <cardano-cli args...>  # against the FOLLOWER's socket
 #
-# Isolation is unchanged. The follower joins devnet-node-isolated's OWN network
+# Container names derive from the run directories, so several fork pairs can run
+# at once. --of defaults to the follower's run dir with a trailing "-follower"
+# removed, which is what `devnet fork follow` creates.
+#
+# Isolation is unchanged. The follower joins the FORGER'S OWN network
 # namespace (--network container:...), the same way `isolated-node cli` does, so
 # it reaches the forger at 127.0.0.1:3001 while the namespace still contains
 # nothing but lo: no interface, no route, no published port, nothing for a real
 # preview node to reach or be reached by. Running the follower on a bridge
 # network instead would have given up exactly the property phase 8 established.
 #
-# The forger must already be running. Two consequences follow from that, and
-# both matter when the clock is accelerated (scripts/set-faketime --rate):
+# The forger must already be running, so the follower always starts second. With
+# an accelerated clock that used to be a race: libfaketime anchors a speed-up at
+# PROCESS start, so at x100 one real second of launch skew is 100 slots of clock
+# skew, and a follower whose clock sits BEHIND the chain rejects every block it
+# receives. Measured launch skew was 21.6 real seconds -- 2157 slots at x100 --
+# against a lead of 400, so padding it was never reliable.
 #
-#   * libfaketime anchors a speed-up at PROCESS start, so a container that
-#     starts later is proportionally behind -- at x100, one real second of
-#     launch skew is 100 slots of clock skew. The follower starts second, so
-#     with equal targets its clock would sit BEHIND the forger's and every
-#     block it received would look like a block from the future.
-#   * Give the follower's faketime target a deliberate LEAD (a few hundred
-#     slots) so it lands ahead instead. A follower whose clock runs ahead of
-#     the chain is the ordinary case and costs nothing; one whose clock runs
-#     behind the chain rejects the chain.
+# The fix is not a lead. Put the run's clock in stamp-file mode
+# (set-faketime --stamp) and set it AFTER the follower is up, from the forger's
+# actual clock plus a margin; `devnet fork follow` does this. A stamp write
+# re-anchors at the read, so the value to write is "the clock is X now", not an
+# offset. See test/fixtures/fork-mode-clock-signal.md 10e.
 
 set -euo pipefail
 
 DEVNET_ROOT=${DEVNET_ROOT:-$(git -C "$(dirname "$0")" rev-parse --show-toplevel)}
 IMAGE=${DEVNET_IMAGE:-ghcr.io/cryptophonic/cardano-node-ogmios:v7.0.0_11.1.2-custom-cb30ce58-faketime}
-NAME=devnet-node-follower
-FORGER=devnet-node-isolated
+container_for() { local b; b=$(basename "${1%/}"); echo "devnet-fork-${b#run-}"; }
 export MY_UID=${MY_UID:-$(id -u)}
 export MY_GID=${MY_GID:-$(id -g)}
 
@@ -43,8 +46,17 @@ cmd=${1:-}; shift || true
 
 case "$cmd" in
   start)
-    rundir=${1:?usage: follower-node start <run dir>}
+    rundir=${1:?usage: follower-node start <run dir> [--of <forger run dir>]}; shift
     rundir=$(realpath "$rundir")
+    forgerdir=""
+    [ "${1:-}" = "--of" ] && { forgerdir=$(realpath "$2"); shift 2; }
+    NAME=$(container_for "$rundir")
+    if [ -n "$forgerdir" ]; then
+      FORGER=$(container_for "$forgerdir")
+    else
+      FORGER=$(container_for "$(basename "${rundir%-follower}")")
+    fi
+    echo "follower container: $NAME   forger: $FORGER"
     golden=$(realpath "${GOLDEN_DB:-/mnt/cardano/preview}" 2>/dev/null || true)
     if [ -n "$golden" ] && [ "$rundir" = "$golden" -o "$rundir/db" = "$golden" ]; then
       echo "refusing: $rundir is the golden DB" >&2; exit 1
@@ -71,6 +83,8 @@ case "$cmd" in
     docker rm -f "$NAME" >/dev/null 2>&1 || true
     docker run -d --name "$NAME" \
       --platform linux/amd64 \
+      --label devnet.fork=follower \
+      --label "devnet.fork.run=$rundir" \
       --network "container:$FORGER" \
       --user "$MY_UID:$MY_GID" \
       --stop-signal SIGINT \
@@ -87,6 +101,7 @@ case "$cmd" in
     echo "follower started; socket at $rundir/ipc/node.socket"
     ;;
   stop)
+    NAME=$(container_for "${1:?usage: follower-node stop <run dir>}")
     sock=$(docker inspect "$NAME" \
              --format '{{range .Mounts}}{{if eq .Destination "/ipc"}}{{.Source}}{{end}}{{end}}' \
              2>/dev/null)/node.socket
@@ -94,9 +109,13 @@ case "$cmd" in
     [ -S "$sock" ] && rm -f "$sock" && echo "removed stale socket $sock"
     ;;
   logs)
+    NAME=$(container_for "${1:?usage: follower-node logs <run dir> [-f]}"); shift
     docker logs "$@" "$NAME"
     ;;
   cli)
+    rundir=$(realpath "${1:?usage: follower-node cli <run dir> <args...>}"); shift
+    NAME=$(container_for "$rundir")
+    FORGER=$(container_for "$(basename "${rundir%-follower}")")
     docker run --rm -i \
       --network "container:$FORGER" \
       --user "$MY_UID:$MY_GID" \
@@ -106,7 +125,7 @@ case "$cmd" in
       "$IMAGE" "$@"
     ;;
   *)
-    sed -n '3,33p' "$0"
+    sed -n '3,40p' "$0"
     exit 1
     ;;
 esac

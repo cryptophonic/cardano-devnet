@@ -8,7 +8,7 @@
 # CurrentSlotUnknown against a chain that real time has left behind.
 #
 # Usage:
-#   set-faketime <run dir>              # derive from devnet-node-isolated's own
+#   set-faketime <run dir>              # derive from THIS run's container's own
 #                                        # last logged tip (the time IT believed
 #                                        # it was at) -- run this right after
 #                                        # `isolated-node stop`
@@ -81,10 +81,12 @@ while [ $# -gt 0 ]; do
 done
 
 if [ -z "$slot" ]; then
-  slot=$(docker logs devnet-node-isolated 2>&1 | sed 's/\x1b\[[0-9;]*m//g' \
+  # this run's own container, not a fixed name: several forks can be running
+  container=devnet-fork-$(basename "$rundir" | sed 's/^run-//')
+  slot=$(docker logs "$container" 2>&1 | sed 's/\x1b\[[0-9;]*m//g' \
          | grep -a 'Chain extended' | tail -1 | grep -oE 'at slot [0-9]+' | grep -oE '[0-9]+')
   [ -n "$slot" ] || {
-    echo "no 'Chain extended' line in devnet-node-isolated's logs; pass --slot <N> explicitly" >&2
+    echo "no 'Chain extended' line in $container's logs; pass --slot <N> explicitly" >&2
     exit 1
   }
 fi

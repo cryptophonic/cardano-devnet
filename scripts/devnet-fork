@@ -29,12 +29,19 @@
 # admission timeouts by the rate (9c: unscaled, every tx fails
 # MempoolTxTooSlow).
 #
-# Only one producer runs at a time: scripts/isolated-node drives the single
-# compose service cardano-node-isolated (container devnet-node-isolated), and
-# scripts/set-faketime reads that container's log to re-derive the clock.
-# `start` refuses when another fork is already running and names it.
+# Several forks run at once. Each run directory gets its own container,
+# devnet-fork-<run suffix>, in its own compose project, and tooling finds them by
+# the docker label devnet.fork=producer rather than by name. Subcommands that
+# take no fork name default to the sole running one and otherwise list them.
 #
-# Env: RUNS_DIR, GOLDEN_DB, CARDANO_CLI_BIN, DEVNET_IMAGE, FORK_MEM_FLOOR_MB.
+# The node itself keeps network_mode: none, so nothing is published per fork and
+# the phase-8 isolation property is untouched however many are running. Sidecars
+# (ogmios, provider, explorer) reach a fork over its Unix socket in <run>/ipc,
+# not over its network namespace -- which is what lets one published entry point
+# serve many forks.
+#
+# Env: RUNS_DIR, GOLDEN_DB, CARDANO_CLI_BIN, DEVNET_IMAGE, FORK_MEM_FLOOR_MB,
+#      FORK_NODE_RSS_MB, FOLLOWER_MARGIN_SLOTS, WARP_TIMEOUT.
 
 set -euo pipefail
 
@@ -44,7 +51,10 @@ RUNS=${RUNS_DIR:-/mnt/cardano/runs}
 CLI=${CARDANO_CLI_BIN:-/mnt/cardano/bin/node-11.1.2/bin/cardano-cli}
 TOOLBIN=$(dirname "$CLI")
 IMAGE=${DEVNET_IMAGE:-ghcr.io/cryptophonic/cardano-node-ogmios:v7.0.0_11.1.2-custom-cb30ce58-faketime}
-FORGER=devnet-node-isolated
+# run dir -> container name, the same mapping scripts/isolated-node uses
+container_for() { local b; b=$(basename "${1%/}"); echo "devnet-fork-${b#run-}"; }
+# Approximate RSS of one preview node, measured (fixture notes): 1.74 GiB.
+NODE_RSS_MB=${FORK_NODE_RSS_MB:-1800}
 
 # Security parameter k from preview's shelley genesis. Below k fork blocks a
 # reset can just drop volatile/; at or above it a fork block has reached the
@@ -91,12 +101,22 @@ print('' if o is None else (json.dumps(o) if isinstance(o,(dict,list)) else o))
 " "$1" "$2"
 }
 
-# The single running producer, as a run directory, or empty.
-running_forger_dir() {
-  docker inspect "$FORGER" \
-    --format '{{if .State.Running}}{{range .Mounts}}{{if eq .Destination "/rundir"}}{{.Source}}{{end}}{{end}}{{end}}' \
-    2>/dev/null || true
+# Every running fork producer, as run directories, one per line.
+running_fork_dirs() {
+  docker ps --filter 'label=devnet.fork=producer' --format '{{.Names}}' \
+    | while read -r n; do
+        [ -n "$n" ] || continue
+        docker inspect "$n" --format \
+          '{{range .Mounts}}{{if eq .Destination "/rundir"}}{{.Source}}{{end}}{{end}}' 2>/dev/null
+      done
 }
+
+# Is this particular fork running?
+fork_running() {
+  docker inspect -f '{{.State.Running}}' "$(container_for "$1")" 2>/dev/null | grep -qx true
+}
+
+running_fork_count() { running_fork_dirs | grep -c . || true; }
 
 # blockEvery that holds ~5 blocks/s at a given rate, floored at 1 slot.
 block_every_for_rate() {
@@ -111,27 +131,32 @@ mem_floor_mb() {
   local network=$1
   if [ -n "${FORK_MEM_FLOOR_MB:-}" ]; then echo "$FORK_MEM_FLOOR_MB"; return; fi
   case "$network" in
-    preview|preprod) echo 5000 ;;
+    # one node plus working room; not a whole-host budget
+    preview|preprod) echo 3000 ;;
     # Unmeasured. Refuse rather than guess: a mainnet node's working set is
     # the thing an engagement gets priced on.
     mainnet) echo "" ;;
-    *) echo 5000 ;;
+    *) echo 3000 ;;
   esac
 }
 
+# Several forks can run at once, so the guard is about headroom for ONE MORE
+# node, not a single global floor. A preview node measured 1.74 GiB resident.
 check_memory() {
-  local network=$1 what=$2 floor avail
+  local network=$1 what=$2 floor avail running
   floor=$(mem_floor_mb "$network")
   avail=$(awk '/MemAvailable/ {print int($2/1024)}' /proc/meminfo)
+  running=$(running_fork_count)
   if [ -z "$floor" ]; then
     die "no measured memory floor for $network; $what refuses to guess.
   Set FORK_MEM_FLOOR_MB=<megabytes> once you have measured it."
   fi
   if [ "$avail" -lt "$floor" ]; then
-    die "$what needs ${floor}MB free, host has ${avail}MB.
-  Stop the other node, or override with FORK_MEM_FLOOR_MB."
+    die "$what needs ${floor}MB free for another node, host has ${avail}MB with \
+$running fork(s) already running.
+  Stop one (devnet fork stop <n>), or override with FORK_MEM_FLOOR_MB."
   fi
-  echo "memory: ${avail}MB available, floor ${floor}MB for $network -- ok"
+  echo "memory: ${avail}MB available, need ${floor}MB, $running fork(s) running -- ok"
 }
 
 # Slot <-> time, and epoch, from a run's own shelley genesis. Preview is
@@ -179,8 +204,6 @@ probe_immutable_tip() {
 chaindb_tip() {
   local source=$1 magic=$2 probe_name=${3:-tipprobe-$$} probe
   probe=$RUNS/run-$probe_name
-  local busy; busy=$(running_forger_dir)
-  [ -n "$busy" ] && die "another fork is running ($busy); stop it before reading a chain tip"
 
   # shellcheck disable=SC2064
   trap "\"$SCRIPTS/isolated-node\" stop >/dev/null 2>&1 || true; rm -rf '$probe'" RETURN
@@ -228,7 +251,7 @@ print(spec)" "$run/chain/shelley-genesis.json" "$run"
 # child process re-anchors the multiplier and reports the bare anchor).
 forger_clock_slot() {
   local run=$1 line ts
-  line=$(docker logs "$FORGER" 2>&1 | sed 's/\x1b\[[0-9;]*m//g' \
+  line=$(docker logs "$(container_for "$run")" 2>&1 | sed 's/\x1b\[[0-9;]*m//g' \
          | grep -a 'Chain extended' | tail -1)
   ts=$(echo "$line" | grep -oE '^\[[0-9-]+ [0-9:.]+Z\]' | tr -d '[]Z')
   [ -n "$ts" ] || return 1
@@ -240,7 +263,7 @@ print(int((c - START).total_seconds() / SLOT_LEN))" "$run/chain/shelley-genesis.
 
 # The live tip slot, asked of the node rather than read from its log.
 live_tip_slot() {
-  "$SCRIPTS/isolated-node" cli latest query tip --testnet-magic "$1" 2>/dev/null \
+  "$SCRIPTS/isolated-node" cli --run "$2" latest query tip --testnet-magic "$1" 2>/dev/null \
     | python3 -c "import json,sys
 try: print(json.load(sys.stdin)['slot'])
 except Exception: pass"
@@ -600,13 +623,7 @@ cmd_start() {
   local run; run=$(resolve_run "$name")
   local m; m=$(require_manifest "$name")
 
-  local busy; busy=$(running_forger_dir)
-  if [ -n "$busy" ]; then
-    [ "$busy" = "$run" ] && die "fork '$name' is already running"
-    die "another fork is already running: $busy
-  Only one producer at a time -- scripts/isolated-node drives the single
-  compose service cardano-node-isolated. Stop it first: devnet fork stop"
-  fi
+  fork_running "$run" && die "fork '$name' is already running"
 
   check_memory "$(mget "$m" network)" "start"
 
@@ -677,11 +694,9 @@ print(f'KES: opcert period {issued}, faked clock in period {period}, '
 # The run's own last forged slot: its container log if it is the one that ran,
 # else the fork slot from the manifest.
 last_slot() {
-  local run=$1 s=""
-  if [ "$(running_forger_dir)" = "$run" ] || docker inspect "$FORGER" \
-       --format '{{range .Mounts}}{{if eq .Destination "/rundir"}}{{.Source}}{{end}}{{end}}' 2>/dev/null \
-       | grep -qx "$run"; then
-    s=$(docker logs "$FORGER" 2>&1 | sed 's/\x1b\[[0-9;]*m//g' \
+  local run=$1 s="" c; c=$(container_for "$run")
+  if docker inspect "$c" >/dev/null 2>&1; then
+    s=$(docker logs "$c" 2>&1 | sed 's/\x1b\[[0-9;]*m//g' \
         | grep -a 'Chain extended' | tail -1 | grep -oE 'at slot [0-9]+' | grep -oE '[0-9]+' || true)
   fi
   [ -n "$s" ] || s=$(mget "$run/manifest.json" fork.slot)
@@ -691,34 +706,47 @@ last_slot() {
 # ---------------------------------------------------------------- stop/status
 
 cmd_stop() {
-  # the follower lives in the producer's network namespace, so it goes first
-  if docker inspect -f '{{.State.Running}}' devnet-node-follower 2>/dev/null | grep -qx true; then
-    "$SCRIPTS/follower-node" stop
-  fi
-  local busy; busy=$(running_forger_dir)
-  [ -n "$busy" ] || { echo "no fork producer running"; return 0; }
+  local run
   if [ $# -gt 0 ]; then
-    local run; run=$(resolve_run "$1")
-    [ "$busy" = "$run" ] || die "fork '$1' is not the running producer ($busy is)"
+    run=$(resolve_run "$1")
+  else
+    local dirs; dirs=$(running_fork_dirs)
+    case "$(echo "$dirs" | grep -c .)" in
+      1) run=$dirs ;;
+      0) echo "no fork producer running"; return 0 ;;
+      *) die "several forks are running; name one:
+$(echo "$dirs" | sed 's/^/  /')" ;;
+    esac
   fi
-  "$SCRIPTS/isolated-node" stop
+  # the follower lives in the producer's network namespace, so it goes first
+  local frun=$run-follower
+  if [ -d "$frun" ] && docker inspect -f '{{.State.Running}}' "$(container_for "$frun")" 2>/dev/null | grep -qx true; then
+    "$SCRIPTS/follower-node" stop "$frun"
+  fi
+  fork_running "$run" || { echo "fork at $run is not running"; return 0; }
+  "$SCRIPTS/isolated-node" stop "$run"
 }
 
 cmd_status() {
   local run m
   if [ $# -gt 0 ]; then run=$(resolve_run "$1"); else
-    run=$(running_forger_dir)
-    [ -n "$run" ] || die "no fork producer running; name one: devnet fork status <n>"
+    local dirs; dirs=$(running_fork_dirs)
+    case "$(echo "$dirs" | grep -c .)" in
+      1) run=$dirs ;;
+      0) die "no fork producer running; name one: devnet fork status <n>" ;;
+      *) die "several forks are running; name one:
+$(echo "$dirs" | sed 's/^/  /')" ;;
+    esac
   fi
   m=$run/manifest.json
   [ -f "$m" ] || die "no manifest at $m -- run 'devnet fork adopt $(basename "$run")'"
 
   local state="stopped"
-  [ "$(running_forger_dir)" = "$run" ] && state="running"
+  fork_running "$run" && state="running"
 
   local tip_json=""
   if [ "$state" = running ]; then
-    tip_json=$("$SCRIPTS/isolated-node" cli latest query tip \
+    tip_json=$("$SCRIPTS/isolated-node" cli --run "$run" latest query tip \
                  --testnet-magic "$(mget "$m" networkMagic)" 2>/dev/null || true)
   fi
 
@@ -778,11 +806,11 @@ cmd_warp() {
   [ -n "$to_slot" ] && [ -n "$to_epoch" ] && die "warp: --to-slot and --to-epoch are exclusive"
 
   local magic; magic=$(mget "$m" networkMagic)
-  [ "$(running_forger_dir)" = "$run" ] || die "fork '$name' is not running.
+  fork_running "$run" || die "fork '$name' is not running.
   A warp needs the chain to advance through the distance, so start it first:
     devnet fork start $name"
 
-  local tip; tip=$(live_tip_slot "$magic")
+  local tip; tip=$(live_tip_slot "$magic" "$run")
   [ -n "$tip" ] || die "could not read the tip from the running node"
 
   local target
@@ -862,7 +890,7 @@ json.dump(m,open(sys.argv[1],'w'),indent=2)" "$m" "$rate" "$be" "$target"
   local deadline=$(( SECONDS + ${WARP_TIMEOUT:-3600} ))
   local last=$tip
   while [ "$SECONDS" -lt "$deadline" ]; do
-    tip=$(live_tip_slot "$magic")
+    tip=$(live_tip_slot "$magic" "$run")
     [ -n "$tip" ] || { sleep 5; continue; }
     [ "$tip" -ge "$target" ] && break
     if [ $(( tip - last )) -ge 2000 ]; then
@@ -892,7 +920,7 @@ cmd_reset() {
   local name=${1:?usage: devnet fork reset <n>}
   local run; run=$(resolve_run "$name")
   local m; m=$(require_manifest "$name")
-  [ "$(running_forger_dir)" = "$run" ] && die "fork '$name' is running; stop it first"
+  fork_running "$run" && die "fork '$name' is running; stop it first"
 
   local fork_slot; fork_slot=$(mget "$m" fork.slot)
   local tip; tip=$(probe_immutable_tip "$run/db" "$run/chain/config.json")
@@ -921,14 +949,14 @@ cmd_reset() {
 # ---------------------------------------------------------------- list
 
 cmd_list() {
-  local busy; busy=$(running_forger_dir)
+  local busy; busy=$(running_fork_dirs)
   printf '%-14s %-9s %-11s %-6s %-8s %s\n' NAME STATE FORK-SLOT RATE BLOCK-EV MANIFEST
   local d
   for d in "$RUNS"/run-*/; do
     [ -d "$d" ] || continue
     d=${d%/}
     local name; name=$(basename "$d"); name=${name#run-}
-    local state="stopped"; [ "$busy" = "$d" ] && state="running"
+    local state="stopped"; echo "$busy" | grep -qx "$d" && state="running"
     if [ -f "$d/manifest.json" ]; then
       printf '%-14s %-9s %-11s %-6s %-8s %s\n' "$name" "$state" \
         "$(mget "$d/manifest.json" fork.slot)" \
@@ -950,7 +978,7 @@ cmd_follow() {
     http://*|https://*)
       die "follow <url>: a remote follower is not wired up yet.
   The follower joins the producer's own network namespace
-  (scripts/follower-node, --network container:$FORGER), which is what keeps
+  (scripts/follower-node, --network container:<the forger>), which is what keeps
   the phase-8 isolation property. Reaching a producer on another machine needs
   a published port and a way to obtain the pre-fork chain, neither of which
   exists today. Copy the manifest and the chain locally and follow that."
@@ -958,8 +986,8 @@ cmd_follow() {
   esac
   [ -f "$src" ] || die "no manifest at $src"
 
-  local busy; busy=$(running_forger_dir)
-  [ -n "$busy" ] || die "no producer running; the follower joins its network namespace"
+  local busy; busy=$(resolve_run "$(mget "$src" name)")
+  fork_running "$busy" || die "fork '$(mget "$src" name)' is not running; the follower joins its network namespace"
 
   local name; name=$(mget "$src" name)
   local fname="$name-follower"
@@ -985,7 +1013,7 @@ print(f'{slot_to_time($(mget "$src" fork.slot) + 10):%Y-%m-%dT%H:%M:%SZ}')" \
   local ftargs=("$frun" --slot "$(mget "$src" fork.slot)" --fake-monotonic --stamp)
   [ "$rate" != "1" ] && ftargs+=(--rate "$rate")
   "$SCRIPTS/set-faketime" "${ftargs[@]}" >/dev/null
-  "$SCRIPTS/follower-node" start "$frun"
+  "$SCRIPTS/follower-node" start "$frun" --of "$busy"
 
   # Now synchronise. A stamp write is absolute and re-anchors at the read, so the
   # value to write is the forger's clock NOW plus headroom -- not an offset added
