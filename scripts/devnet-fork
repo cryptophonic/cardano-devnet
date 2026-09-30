@@ -1,0 +1,796 @@
+#!/bin/bash
+
+# Fork-mode lifecycle. A fork IS a run: the fork directory is the existing
+# numbered run directory (RUNS_DIR, default /mnt/cardano/runs), and
+# manifest.json sits beside chain/fork.env and chain/faketime.env. There is no
+# separate forks/ tree.
+#
+# Usage:
+#   devnet fork create --name <n> --network preview|preprod|mainnet
+#                      --from db:<path>|mithril
+#                      [--slot S] [--rate R] [--block-every B]
+#   devnet fork adopt <run>            # derive a manifest for an existing run
+#   devnet fork start <n> [--rate R]   # start the producer
+#   devnet fork stop [<n>]
+#   devnet fork status [<n>]
+#   devnet fork reset <n>              # back to the fork point
+#   devnet fork list
+#   devnet fork follow <manifest path> # start a follower beside the producer
+#
+# <n> is a fork name; the directory is <RUNS_DIR>/run-<n>. A run directory
+# path is accepted anywhere a name is.
+#
+# This wraps scripts/new-isolated-run, scripts/isolated-node,
+# scripts/set-faketime and scripts/follower-node rather than duplicating them.
+# Two things it does that they do not: it defaults the accelerated clock to
+# Arm 2 (CLOCK_MONOTONIC faked -- fixture fork-mode-rate-and-epoch.md 9a shows
+# Arm 1 forges 16 blocks where Arm 2 forges 951), and it scales the mempool
+# admission timeouts by the rate (9c: unscaled, every tx fails
+# MempoolTxTooSlow).
+#
+# Only one producer runs at a time: scripts/isolated-node drives the single
+# compose service cardano-node-isolated (container devnet-node-isolated), and
+# scripts/set-faketime reads that container's log to re-derive the clock.
+# `start` refuses when another fork is already running and names it.
+#
+# Env: RUNS_DIR, GOLDEN_DB, CARDANO_CLI_BIN, DEVNET_IMAGE, FORK_MEM_FLOOR_MB.
+
+set -euo pipefail
+
+DEVNET_ROOT=${DEVNET_ROOT:-$(git -C "$(dirname "$0")" rev-parse --show-toplevel)}
+SCRIPTS=$DEVNET_ROOT/scripts
+RUNS=${RUNS_DIR:-/mnt/cardano/runs}
+CLI=${CARDANO_CLI_BIN:-/mnt/cardano/bin/node-11.1.2/bin/cardano-cli}
+TOOLBIN=$(dirname "$CLI")
+IMAGE=${DEVNET_IMAGE:-ghcr.io/cryptophonic/cardano-node-ogmios:v7.0.0_11.1.2-custom-cb30ce58-faketime}
+FORGER=devnet-node-isolated
+
+# Security parameter k from preview's shelley genesis. Below k fork blocks a
+# reset can just drop volatile/; at or above it a fork block has reached the
+# ImmutableDB and only db-truncater can unfork (fixture fork-mode-unfork.md).
+SECURITY_PARAM=432
+
+# Base mempool admission timeouts in seconds, scaled by the rate at start.
+MEMPOOL_SOFT=1
+MEMPOOL_HARD=1.5
+MEMPOOL_CAPACITY=5
+
+usage() { sed -n '3,30p' "$0"; exit "${1:-1}"; }
+die() { echo "devnet fork: $*" >&2; exit 1; }
+
+# ---------------------------------------------------------------- helpers
+
+# Accept a bare name, a run-<name> directory name, or a path.
+resolve_run() {
+  local n=$1
+  case "$n" in
+    */*) realpath "$n" ;;
+    run-*) echo "$RUNS/$n" ;;
+    *) echo "$RUNS/run-$n" ;;
+  esac
+}
+
+manifest_of() { echo "$(resolve_run "$1")/manifest.json"; }
+
+require_manifest() {
+  local m; m=$(manifest_of "$1")
+  [ -f "$m" ] || die "no manifest at $m -- run 'devnet fork adopt $1' first"
+  echo "$m"
+}
+
+# Read one dotted key out of a manifest.
+mget() {
+  python3 -c "
+import json,sys
+o=json.load(open(sys.argv[1]))
+for k in sys.argv[2].split('.'):
+    o = o.get(k) if isinstance(o, dict) else None
+    if o is None: break
+print('' if o is None else (json.dumps(o) if isinstance(o,(dict,list)) else o))
+" "$1" "$2"
+}
+
+# The single running producer, as a run directory, or empty.
+running_forger_dir() {
+  docker inspect "$FORGER" \
+    --format '{{if .State.Running}}{{range .Mounts}}{{if eq .Destination "/rundir"}}{{.Source}}{{end}}{{end}}{{end}}' \
+    2>/dev/null || true
+}
+
+# blockEvery that holds ~5 blocks/s at a given rate, floored at 1 slot.
+block_every_for_rate() {
+  python3 -c "print(max(1, round($1/5)))"
+}
+
+# Manifests store the rate as a JSON number, so it reads back as "100.0";
+# libfaketime wants "x100". Trim the trailing .0.
+rate_str() { python3 -c "r=float('$1'); print(int(r) if r==int(r) else r)"; }
+
+mem_floor_mb() {
+  local network=$1
+  if [ -n "${FORK_MEM_FLOOR_MB:-}" ]; then echo "$FORK_MEM_FLOOR_MB"; return; fi
+  case "$network" in
+    preview|preprod) echo 5000 ;;
+    # Unmeasured. Refuse rather than guess: a mainnet node's working set is
+    # the thing an engagement gets priced on.
+    mainnet) echo "" ;;
+    *) echo 5000 ;;
+  esac
+}
+
+check_memory() {
+  local network=$1 what=$2 floor avail
+  floor=$(mem_floor_mb "$network")
+  avail=$(awk '/MemAvailable/ {print int($2/1024)}' /proc/meminfo)
+  if [ -z "$floor" ]; then
+    die "no measured memory floor for $network; $what refuses to guess.
+  Set FORK_MEM_FLOOR_MB=<megabytes> once you have measured it."
+  fi
+  if [ "$avail" -lt "$floor" ]; then
+    die "$what needs ${floor}MB free, host has ${avail}MB.
+  Stop the other node, or override with FORK_MEM_FLOOR_MB."
+  fi
+  echo "memory: ${avail}MB available, floor ${floor}MB for $network -- ok"
+}
+
+# Slot <-> time, and epoch, from a run's own shelley genesis. Preview is
+# slotLength=1 so this is exact; do not reconstruct it from era history.
+genesis_py() {
+  cat <<'PY'
+import datetime, json, sys
+g = json.load(open(sys.argv[1]))
+START = datetime.datetime.strptime(g['systemStart'], '%Y-%m-%dT%H:%M:%SZ').replace(tzinfo=datetime.timezone.utc)
+SLOT_LEN = g['slotLength']
+EPOCH_LEN = g['epochLength']
+KES_SLOTS = g['slotsPerKESPeriod']
+KES_MAX = g['maxKESEvolutions']
+def slot_to_time(s): return START + datetime.timedelta(seconds=s * SLOT_LEN)
+def epoch_of(s): return int(s // EPOCH_LEN)
+def kes_of(s): return int(s // KES_SLOTS)
+PY
+}
+
+# The ImmutableDB tip, without starting a node: resume from the newest on-disk
+# ledger snapshot (directory names are slot numbers) so only the tail is
+# replayed -- under a second on a preview DB.
+#
+# This is NOT the chain tip. db-analyser reads the ImmutableDB only, and the
+# last ~k blocks of a synced chain live in the VolatileDB: on the preview
+# golden DB the ImmutableDB tip is slot 123360598 while the node's own tip is
+# 123372484, ~11900 slots further on. Use chaindb_tip for the fork point.
+probe_immutable_tip() {
+  local db=$1 config=$2 from
+  from=$(ls -1 "$db/ledger" 2>/dev/null | grep -E '^[0-9]+$' | sort -n | tail -1)
+  [ -n "$from" ] || die "no ledger snapshot in $db/ledger to resume from; pass --slot explicitly"
+  "$TOOLBIN/db-analyser" --db "$db" --config "$config" \
+      --analyse-from "$from" --count-blocks \
+      --db-validation minimum-block-validation --lsm 2>&1 \
+    | sed -n 's/.*blockPointSlot = SlotNo \([0-9]*\).*blockPointHash = \([0-9a-f]*\).*/\1 \2/p' \
+    | tail -1
+}
+
+# The node's OWN selected tip, volatile blocks included -- the natural fork
+# point, and the only way to get it is to ask a node. Never against the golden
+# DB, so this works on a throwaway reflink clone with the fork gates unset: a
+# gate at the wrong slot would make the node reject the very blocks we are
+# trying to measure. `query tip` answers from the ChainDB, so a DB that real
+# time has left far behind still reports its tip.
+chaindb_tip() {
+  local source=$1 magic=$2 probe_name=${3:-tipprobe-$$} probe
+  probe=$RUNS/run-$probe_name
+  local busy; busy=$(running_forger_dir)
+  [ -n "$busy" ] && die "another fork is running ($busy); stop it before reading a chain tip"
+
+  # shellcheck disable=SC2064
+  trap "\"$SCRIPTS/isolated-node\" stop >/dev/null 2>&1 || true; rm -rf '$probe'" RETURN
+  rm -rf "$probe"
+  GOLDEN_DB=$source RUNS_DIR=$RUNS CARDANO_CLI_BIN=$CLI \
+    "$SCRIPTS/new-isolated-run" "$probe_name" >/dev/null
+  "$SCRIPTS/isolated-node" start "$probe" >/dev/null 2>&1
+
+  local tip=""
+  local deadline=$(( SECONDS + ${TIP_PROBE_TIMEOUT:-300} ))
+  while [ $SECONDS -lt $deadline ]; do
+    tip=$("$SCRIPTS/isolated-node" cli latest query tip --testnet-magic "$magic" 2>/dev/null || true)
+    case "$tip" in *'"slot"'*) break ;; esac
+    tip=""; sleep 5
+  done
+  [ -n "$tip" ] || die "timed out reading the chain tip from $source/db"
+  python3 -c "
+import json,sys
+t = json.load(sys.stdin)
+print(t['slot'], t['hash'], t['block'])" <<<"$tip"
+}
+
+# ---------------------------------------------------------------- create
+
+cmd_create() {
+  local name="" network="" from="" slot="" rate=1 block_every=""
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --name) name=${2:?}; shift 2 ;;
+      --network) network=${2:?}; shift 2 ;;
+      --from) from=${2:?}; shift 2 ;;
+      --slot) slot=${2:?}; shift 2 ;;
+      --rate) rate=${2:?}; shift 2 ;;
+      --block-every) block_every=${2:?}; shift 2 ;;
+      *) die "create: unknown argument $1" ;;
+    esac
+  done
+  [ -n "$name" ] || die "create: --name is required"
+  [ -n "$network" ] || die "create: --network is required"
+  [ -n "$from" ] || die "create: --from is required (db:<path> or mithril)"
+  case "$network" in preview|preprod|mainnet) ;; *) die "create: unknown network $network" ;; esac
+
+  local run; run=$(resolve_run "$name")
+  [ -e "$run" ] && die "$run already exists (run directories are never reused)"
+
+  # --- source chain
+  local source mithril_digest=""
+  case "$from" in
+    db:*) source=$(realpath "${from#db:}") ;;
+    mithril)
+      die "create --from mithril: mithril-client is not on PATH and this script
+  will not download a chain implicitly. Fetch the snapshot yourself, then use
+  --from db:<path>. The recorded invocation for this host is in
+  \$GOLDEN_DB/mithril/download.log (mithril-client CLI 0.13.9)."
+      ;;
+    *) die "create: --from must be db:<path> or mithril" ;;
+  esac
+  [ -d "$source/db" ] || die "$source/db not found (a source dir holds db/, config/, pool/, god/)"
+  [ -d "$source/config" ] || die "$source/config not found"
+  [ -f "$source/mithril/download.log" ] && \
+    mithril_digest=$(grep -oE "snapshot '[0-9a-f]{64}'" "$source/mithril/download.log" \
+                     | head -1 | grep -oE '[0-9a-f]{64}' || true)
+
+  # --- identity: reuse the source's god key and pool, generate if absent
+  ensure_identity "$source"
+
+  # --- fork slot: default to the source's own chain tip, volatile blocks
+  # included. Not the ImmutableDB tip: the last ~k blocks of a synced chain
+  # are still volatile, and gating below them would leave real blocks above
+  # the fork slot, where fork mode rejects them -- silently discarding the
+  # most recent stretch of the chain, which is usually the part worth forking.
+  local fork_hash="" fork_block=""
+  if [ -z "$slot" ]; then
+    echo "reading $source/db's chain tip (throwaway clone, gates unset)..."
+    local probed; probed=$(chaindb_tip "$source" "$(network_magic "$network")")
+    [ -n "$probed" ] || die "could not read a tip from $source/db; pass --slot"
+    read -r slot fork_hash fork_block <<<"$probed"
+    echo "fork slot defaults to the chain tip: $slot (block $fork_block, $fork_hash)"
+  fi
+
+  [ -n "$block_every" ] || block_every=$(block_every_for_rate "$rate")
+
+  # --- the opcert must be issued at the KES period of the FAKED clock, which
+  # is anchored just past the fork slot. Compute that instant for FORK_NOW.
+  local fork_now
+  fork_now=$(python3 -c "$(genesis_py)
+print(f'{slot_to_time($slot + 10):%Y-%m-%dT%H:%M:%SZ}')" "$source/config/shelley-genesis.json")
+
+  echo "building run directory (reflink clone of $source/db)..."
+  FORK_NOW=$fork_now GOLDEN_DB=$source RUNS_DIR=$RUNS CARDANO_CLI_BIN=$CLI \
+    "$SCRIPTS/new-isolated-run" "$name" "$slot" "$block_every"
+
+  # --- an explicit --slot behind the ImmutableDB tip is a real truncation:
+  # db-truncater rewrites the ImmutableDB, and everything volatile is above
+  # the fork slot by definition, so it goes too.
+  #
+  # A fork slot inside the volatile range needs no truncation. The gate does
+  # the work: blocks above it have other issuers, fork mode rejects them, and
+  # the node selects up to the fork slot and forges on from there. They stay
+  # on disk as dead weight until the next reset.
+  local imm; imm=$(probe_immutable_tip "$run/db" "$run/chain/config.json")
+  local imm_slot=${imm%% *}
+  if [ "$slot" -lt "$imm_slot" ]; then
+    echo "truncating ImmutableDB from $imm_slot to the fork slot $slot..."
+    "$TOOLBIN/db-truncater" --db "$run/db" --truncate-after-slot "$slot" \
+      --config "$run/chain/config.json"
+    rm -rf "${run:?}/db/volatile"
+    drop_late_snapshots "$run/db" "$slot"
+    fork_hash=$(probe_immutable_tip "$run/db" "$run/chain/config.json"); fork_hash=${fork_hash##* }
+  elif [ "$slot" -gt "$imm_slot" ]; then
+    echo "fork slot $slot is in the volatile range (ImmutableDB tip $imm_slot);"
+    echo "  no truncation -- the gate rejects the real blocks above it."
+  fi
+
+  apply_rate "$run" "$rate" "$slot"
+  write_manifest "$run" "$name" "$network" "$source" "$slot" "$fork_hash" \
+                 "$rate" "$block_every" "$mithril_digest"
+
+  echo
+  echo "fork '$name' created: $run"
+  echo "  manifest: $run/manifest.json"
+  echo "  seeds:    not extracted (devnet fork seeds -- Step 4)"
+  echo "  start it: devnet fork start $name"
+}
+
+# A fork's identity lives in the source dir, the same contract
+# /mnt/cardano/preview already follows: god/{god.skey,god.vkey} and
+# pool/{cold,kes,vrf}.*. Generate only what is missing.
+ensure_identity() {
+  local source=$1
+  if [ ! -f "$source/god/god.vkey" ]; then
+    echo "generating god key in $source/god (source dir had none)"
+    mkdir -p "$source/god"
+    $CLI latest address key-gen \
+      --verification-key-file "$source/god/god.vkey" \
+      --signing-key-file "$source/god/god.skey"
+  fi
+  mkdir -p "$source/pool"
+  if [ ! -f "$source/pool/cold.vkey" ]; then
+    echo "generating fork pool cold key in $source/pool"
+    $CLI latest node key-gen \
+      --cold-verification-key-file "$source/pool/cold.vkey" \
+      --cold-signing-key-file "$source/pool/cold.skey" \
+      --operational-certificate-issue-counter-file "$source/pool/opcert.counter"
+  fi
+  if [ ! -f "$source/pool/kes.vkey" ]; then
+    echo "generating fork pool KES key in $source/pool"
+    $CLI latest node key-gen-KES \
+      --verification-key-file "$source/pool/kes.vkey" \
+      --signing-key-file "$source/pool/kes.skey"
+  fi
+  if [ ! -f "$source/pool/vrf.vkey" ]; then
+    echo "generating fork pool VRF key in $source/pool"
+    $CLI latest node key-gen-VRF \
+      --verification-key-file "$source/pool/vrf.vkey" \
+      --signing-key-file "$source/pool/vrf.skey"
+    chmod 600 "$source/pool/vrf.skey"
+  fi
+}
+
+# A ledger snapshot taken after the fork slot is state the truncated chain no
+# longer leads to; leaving it would let the node resume past its own tip.
+drop_late_snapshots() {
+  local db=$1 slot=$2 s
+  for s in $(ls -1 "$db/ledger" 2>/dev/null | grep -E '^[0-9]+$' || true); do
+    if [ "$s" -gt "$slot" ]; then
+      echo "  dropping ledger snapshot $s (after the fork slot)"
+      rm -rf "${db:?}/ledger/$s"
+    fi
+  done
+}
+
+# Write the run's clock and the rate-scaled mempool timeouts. Arm 2 always:
+# CLOCK_MONOTONIC is faked along with the wall clock.
+apply_rate() {
+  local run=$1 rate=$2 slot=$3
+  local args=("$run" --slot "$slot" --fake-monotonic)
+  [ "$rate" != "1" ] && args+=(--rate "$rate")
+  "$SCRIPTS/set-faketime" "${args[@]}"
+
+  python3 -c "
+import json, sys
+run, rate = sys.argv[1], float(sys.argv[2])
+p = run + '/chain/config.json'
+c = json.load(open(p))
+def scale(v):
+    x = v * rate
+    return int(x) if x == int(x) else x
+c['MempoolTimeoutSoft'] = scale($MEMPOOL_SOFT)
+c['MempoolTimeoutHard'] = scale($MEMPOOL_HARD)
+c['MempoolTimeoutCapacity'] = scale($MEMPOOL_CAPACITY)
+json.dump(c, open(p, 'w'), indent=2)
+print(f\"mempool timeouts scaled by x{rate:g}: \"
+      f\"soft={c['MempoolTimeoutSoft']} hard={c['MempoolTimeoutHard']} \"
+      f\"capacity={c['MempoolTimeoutCapacity']}\")
+" "$run" "$rate"
+}
+
+write_manifest() {
+  local run=$1 name=$2 network=$3 source=$4 slot=$5 hash=$6 rate=$7 be=$8 mithril=$9
+  local addr kes
+  addr=$($CLI latest address build \
+           --payment-verification-key-file "$source/god/god.vkey" \
+           --testnet-magic "$(network_magic "$network")" 2>/dev/null || true)
+  # the opcert was issued at the KES period of the faked clock, which
+  # new-isolated-run was pointed at via FORK_NOW = fork slot + the 10s lead
+  kes=$(python3 -c "$(genesis_py)
+print(kes_of($slot + 10))" "$run/chain/shelley-genesis.json")
+
+  M_NAME=$name M_NETWORK=$network M_MAGIC=$(network_magic "$network") \
+  M_SLOT=$slot M_HASH=$hash \
+  M_GOD=$(sed -n 's/^CARDANO_FORK_GOD_KEY=//p' "$run/chain/fork.env") \
+  M_POOL=$(sed -n 's/^CARDANO_FORK_POOL_ID=//p' "$run/chain/fork.env") \
+  M_ADDR=$addr M_KES=$kes M_RATE=$rate M_BE=$be M_IMAGE=$IMAGE \
+  M_DIGEST=$(docker image inspect "$IMAGE" --format '{{index .RepoDigests 0}}' 2>/dev/null | sed 's/.*@//' || true) \
+  M_MITHRIL=$mithril \
+  write_manifest_env "$run"
+}
+
+network_magic() {
+  case "$1" in
+    preview) echo 2 ;;
+    preprod) echo 1 ;;
+    mainnet) echo 764824073 ;;
+    *) echo 2 ;;
+  esac
+}
+
+# ---------------------------------------------------------------- adopt
+
+cmd_adopt() {
+  local target=${1:?usage: devnet fork adopt <run>}
+  local run; run=$(resolve_run "$target")
+  [ -d "$run/chain" ] || die "$run is not a run directory"
+  [ -f "$run/manifest.json" ] && die "$run already has a manifest"
+  [ -f "$run/chain/fork.env" ] || die "$run has no chain/fork.env -- not a fork (gates unset)"
+
+  local name; name=$(basename "$run"); name=${name#run-}
+  local slot; slot=$(sed -n 's/^CARDANO_FORK_SLOT=//p' "$run/chain/fork.env")
+  # absent on a follower, which carries the gates but must not forge
+  local be; be=$(sed -n 's/^CARDANO_FORK_BLOCK_EVERY=//p' "$run/chain/fork.env")
+  local role=producer
+  grep -q '"localRoots": \[\]' "$run/chain/topology.json" 2>/dev/null || role=follower
+  [ "$role" = follower ] && be=""
+
+  # The hash AT the fork slot is not recoverable from a run that has already
+  # forged past it: db-analyser can only resume from an on-disk ledger
+  # snapshot, and those are all post-fork by then. Leave it null rather than
+  # record the current tip's hash, which is a different block.
+  local hash=""
+
+  local rate=1 anchor=""
+  if [ -f "$run/chain/faketime.env" ]; then
+    local ft; ft=$(sed -n 's/^FAKETIME=//p' "$run/chain/faketime.env")
+    anchor=${ft%% x*}
+    case "$ft" in *' x'*) rate=${ft##* x} ;; esac
+  else
+    "$SCRIPTS/set-faketime" "$run" --slot "$slot" --fake-monotonic >/dev/null
+    echo "no faketime.env: wrote one anchored at the fork slot (Arm 2, x1)"
+  fi
+
+  local network; network=$(guess_network "$run/chain/shelley-genesis.json")
+  local kes; kes=$(python3 -c "$(genesis_py)
+print(kes_of($slot))" "$run/chain/shelley-genesis.json")
+
+  # the god address is derivable only if the source dir that made this run is
+  # still around; it is not required to follow, so an absence is not an error
+  local addr=""
+  local gv=${GOLDEN_DB:-/mnt/cardano/preview}/god/god.vkey
+  [ -f "$gv" ] && addr=$($CLI latest address build --payment-verification-key-file "$gv" \
+                           --testnet-magic "$(network_magic "$network")" 2>/dev/null || true)
+
+  M_NAME=$name M_NETWORK=$network M_MAGIC=$(network_magic "$network") \
+  M_SLOT=$slot M_HASH=$hash M_GOD=$(sed -n 's/^CARDANO_FORK_GOD_KEY=//p' "$run/chain/fork.env") \
+  M_POOL=$(sed -n 's/^CARDANO_FORK_POOL_ID=//p' "$run/chain/fork.env") \
+  M_ADDR=$addr M_KES=$kes M_RATE=$rate M_BE=$be M_ROLE=$role M_IMAGE=$IMAGE \
+  M_DIGEST=$(docker image inspect "$IMAGE" --format '{{index .RepoDigests 0}}' 2>/dev/null | sed 's/.*@//' || true) \
+  M_MITHRIL="" \
+  write_manifest_env "$run"
+  echo "adopted $run as fork '$name'"
+}
+
+guess_network() {
+  python3 -c "
+import json,sys
+g=json.load(open(sys.argv[1]))
+print({2:'preview',1:'preprod',764824073:'mainnet'}.get(g.get('networkMagic'),'preview'))
+" "$1"
+}
+
+# write_manifest builds its environment inline; adopt supplies it directly.
+write_manifest_env() {
+  local run=$1
+  python3 -c "$(genesis_py)
+import json, os
+run = sys.argv[2]
+faketime = {}
+if os.path.exists(run + '/chain/faketime.env'):
+    for line in open(run + '/chain/faketime.env'):
+        if '=' in line:
+            k, v = line.rstrip('\n').split('=', 1)
+            faketime[k] = v
+ft = faketime.get('FAKETIME', '')
+anchor, _, _r = ft.partition(' x')
+slot = int(os.environ['M_SLOT'])
+m = {
+  'manifestVersion': 1,
+  'name': os.environ['M_NAME'],
+  'network': os.environ['M_NETWORK'],
+  'networkMagic': int(os.environ['M_MAGIC']),
+  'genesis': {
+    'systemStart': START.strftime('%Y-%m-%dT%H:%M:%SZ'),
+    'slotLength': SLOT_LEN, 'epochLength': EPOCH_LEN,
+    'slotsPerKESPeriod': KES_SLOTS, 'maxKESEvolutions': KES_MAX,
+    'securityParam': json.load(open(sys.argv[1]))['securityParam'],
+  },
+  'fork': {
+    'slot': slot, 'hash': os.environ['M_HASH'] or None, 'epoch': epoch_of(slot),
+    'time': slot_to_time(slot).strftime('%Y-%m-%dT%H:%M:%SZ'),
+  },
+  'godKeyHash': os.environ['M_GOD'],
+  'producer': {
+    'poolId': os.environ['M_POOL'],
+    'address': os.environ['M_ADDR'] or None,
+    'opcertKesPeriod': int(os.environ['M_KES']),
+    'kesPeriodsValid': KES_MAX,
+  },
+  'clock': {
+    'anchor': anchor, 'rate': float(os.environ['M_RATE']),
+    'fakeMonotonic': faketime.get('FAKETIME_DONT_FAKE_MONOTONIC') == '0',
+    'anchorSlot': slot,
+  },
+  # null on a follower: it carries the fork gates so it accepts the forged
+  # blocks, but must not have the cadence or it would forge too
+  'blockEvery': int(os.environ['M_BE']) if os.environ['M_BE'] else None,
+  'role': os.environ.get('M_ROLE', 'producer'),
+  'image': os.environ['M_IMAGE'],
+  'imageDigest': os.environ['M_DIGEST'] or None,
+  'mithrilSnapshotDigest': os.environ['M_MITHRIL'] or None,
+  'ccScriptsDirHash': None,
+  'seeds': None,
+  'createdAt': datetime.datetime.now(datetime.timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ'),
+}
+json.dump(m, open(run + '/manifest.json', 'w'), indent=2)
+print('wrote ' + run + '/manifest.json')
+" "$run/chain/shelley-genesis.json" "$run"
+}
+
+# ---------------------------------------------------------------- start
+
+cmd_start() {
+  local name=${1:?usage: devnet fork start <n> [--rate R]}; shift || true
+  local rate=""
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --rate) rate=${2:?}; shift 2 ;;
+      *) die "start: unknown argument $1" ;;
+    esac
+  done
+  local run; run=$(resolve_run "$name")
+  local m; m=$(require_manifest "$name")
+
+  local busy; busy=$(running_forger_dir)
+  if [ -n "$busy" ]; then
+    [ "$busy" = "$run" ] && die "fork '$name' is already running"
+    die "another fork is already running: $busy
+  Only one producer at a time -- scripts/isolated-node drives the single
+  compose service cardano-node-isolated. Stop it first: devnet fork stop"
+  fi
+
+  check_memory "$(mget "$m" network)" "start"
+
+  # A rate change rewrites the clock, the cadence and the mempool timeouts.
+  if [ -n "$rate" ] && [ "$(rate_str "$rate")" != "$(rate_str "$(mget "$m" clock.rate)")" ]; then
+    rate=$(rate_str "$rate")
+    local be; be=$(block_every_for_rate "$rate")
+    echo "rate x$rate: blockEvery $be, mempool timeouts x$rate"
+    if grep -q '^CARDANO_FORK_BLOCK_EVERY=' "$run/chain/fork.env"; then
+      sed -i "s/^CARDANO_FORK_BLOCK_EVERY=.*/CARDANO_FORK_BLOCK_EVERY=$be/" "$run/chain/fork.env"
+    else
+      echo "CARDANO_FORK_BLOCK_EVERY=$be" >> "$run/chain/fork.env"
+    fi
+    apply_rate "$run" "$rate" "$(last_slot "$run")"
+    python3 -c "
+import json,sys
+m=json.load(open(sys.argv[1])); m['clock']['rate']=float(sys.argv[2]); m['blockEvery']=int(sys.argv[3])
+ft=dict(l.rstrip('\n').split('=',1) for l in open(sys.argv[4]) if '=' in l)
+m['clock']['anchor']=ft.get('FAKETIME','').split(' x')[0]
+json.dump(m,open(sys.argv[1],'w'),indent=2)
+" "$m" "$rate" "$be" "$run/chain/faketime.env"
+  fi
+
+  check_kes "$run" "$m"
+  "$SCRIPTS/isolated-node" start "$run"
+}
+
+# The opcert is valid for [issued, issued + maxKESEvolutions). The node checks
+# that against its OWN clock, which is the faked one.
+check_kes() {
+  local run=$1 m=$2
+  python3 -c "$(genesis_py)
+import datetime, json, os
+m = json.load(open(sys.argv[2]))
+ft = dict(l.rstrip('\n').split('=',1) for l in open(sys.argv[3]) if '=' in l)
+anchor = ft.get('FAKETIME','').split(' x')[0].lstrip('@')
+now = datetime.datetime.strptime(anchor, '%Y-%m-%d %H:%M:%S').replace(tzinfo=datetime.timezone.utc)
+slot = int((now - START).total_seconds() / SLOT_LEN)
+period = kes_of(slot)
+issued = m['producer']['opcertKesPeriod']
+if not (issued <= period < issued + KES_MAX):
+    raise SystemExit(
+      f\"devnet fork: opcert KES period {issued} does not cover the faked clock \"
+      f\"(period {period}, slot {slot}).\n\"
+      f\"  Valid periods: {issued}..{issued + KES_MAX - 1}.\n\"
+      f\"  Reissue with FORK_NOW at the target instant, or warp less far.\")
+print(f'KES: opcert period {issued}, faked clock in period {period}, '
+      f'{issued + KES_MAX - period} of {KES_MAX} periods remaining -- ok')
+" "$run/chain/shelley-genesis.json" "$m" "$run/chain/faketime.env"
+}
+
+# The run's own last forged slot: its container log if it is the one that ran,
+# else the fork slot from the manifest.
+last_slot() {
+  local run=$1 s=""
+  if [ "$(running_forger_dir)" = "$run" ] || docker inspect "$FORGER" \
+       --format '{{range .Mounts}}{{if eq .Destination "/rundir"}}{{.Source}}{{end}}{{end}}' 2>/dev/null \
+       | grep -qx "$run"; then
+    s=$(docker logs "$FORGER" 2>&1 | sed 's/\x1b\[[0-9;]*m//g' \
+        | grep -a 'Chain extended' | tail -1 | grep -oE 'at slot [0-9]+' | grep -oE '[0-9]+' || true)
+  fi
+  [ -n "$s" ] || s=$(mget "$run/manifest.json" fork.slot)
+  echo "$s"
+}
+
+# ---------------------------------------------------------------- stop/status
+
+cmd_stop() {
+  # the follower lives in the producer's network namespace, so it goes first
+  if docker inspect -f '{{.State.Running}}' devnet-node-follower 2>/dev/null | grep -qx true; then
+    "$SCRIPTS/follower-node" stop
+  fi
+  local busy; busy=$(running_forger_dir)
+  [ -n "$busy" ] || { echo "no fork producer running"; return 0; }
+  if [ $# -gt 0 ]; then
+    local run; run=$(resolve_run "$1")
+    [ "$busy" = "$run" ] || die "fork '$1' is not the running producer ($busy is)"
+  fi
+  "$SCRIPTS/isolated-node" stop
+}
+
+cmd_status() {
+  local run m
+  if [ $# -gt 0 ]; then run=$(resolve_run "$1"); else
+    run=$(running_forger_dir)
+    [ -n "$run" ] || die "no fork producer running; name one: devnet fork status <n>"
+  fi
+  m=$run/manifest.json
+  [ -f "$m" ] || die "no manifest at $m -- run 'devnet fork adopt $(basename "$run")'"
+
+  local state="stopped"
+  [ "$(running_forger_dir)" = "$run" ] && state="running"
+
+  local tip_json=""
+  if [ "$state" = running ]; then
+    tip_json=$("$SCRIPTS/isolated-node" cli latest query tip \
+                 --testnet-magic "$(mget "$m" networkMagic)" 2>/dev/null || true)
+  fi
+
+  STATUS_STATE=$state STATUS_TIP=$tip_json python3 -c "$(genesis_py)
+import datetime, json, os
+m = json.load(open(sys.argv[2]))
+tip = json.loads(os.environ['STATUS_TIP']) if os.environ.get('STATUS_TIP') else None
+rate = m['clock']['rate']
+anchor = m['clock']['anchor'].lstrip('@')
+print(f\"fork        {m['name']}  ({m['network']}, magic {m['networkMagic']})\")
+print(f\"state       {os.environ['STATUS_STATE']}\")
+print(f\"fork point  slot {m['fork']['slot']}  epoch {m['fork']['epoch']}  {m['fork']['hash'][:16]}...\")
+print(f\"role        {m.get('role','producer')}\")
+print(f\"rate        x{rate:g}   blockEvery {m['blockEvery'] or '- (not forging)'}   \"
+      f\"{'CLOCK_MONOTONIC faked (Arm 2)' if m['clock']['fakeMonotonic'] else 'Arm 1 -- WRONG ARM'}\")
+print(f\"clock       anchored at {anchor}\")
+if tip:
+    slot = tip['slot']
+    print(f\"tip         slot {slot}  block {tip['block']}  epoch {tip['epoch']}  \"
+          f\"{tip['era']}  {tip.get('syncProgress','?')}%\")
+    print(f\"faked now   {slot_to_time(slot):%Y-%m-%d %H:%M:%S} UTC (slot {slot})\")
+    print(f\"since fork  {slot - m['fork']['slot']} slots\")
+    period = kes_of(slot)
+    issued = m['producer']['opcertKesPeriod']
+    print(f\"KES         period {period}, opcert issued {issued}, \"
+          f\"{issued + KES_MAX - period} of {KES_MAX} remaining\")
+else:
+    print('tip         (not running -- start it to query the tip)')
+" "$run/chain/shelley-genesis.json" "$m"
+}
+
+# ---------------------------------------------------------------- reset
+
+cmd_reset() {
+  local name=${1:?usage: devnet fork reset <n>}
+  local run; run=$(resolve_run "$name")
+  local m; m=$(require_manifest "$name")
+  [ "$(running_forger_dir)" = "$run" ] && die "fork '$name' is running; stop it first"
+
+  local fork_slot; fork_slot=$(mget "$m" fork.slot)
+  local tip; tip=$(probe_immutable_tip "$run/db" "$run/chain/config.json")
+  local tip_slot=${tip%% *}
+  local be; be=$(mget "$m" blockEvery); [ -n "$be" ] || be=1
+  local fork_blocks=$(( (tip_slot - fork_slot) / be ))
+
+  echo "fork slot $fork_slot, ImmutableDB tip $tip_slot, ~$fork_blocks fork blocks (k=$SECURITY_PARAM)"
+  if [ "$tip_slot" -le "$fork_slot" ]; then
+    echo "no fork block has reached the ImmutableDB; dropping volatile/ only"
+    rm -rf "${run:?}/db/volatile"
+  else
+    echo "a fork block is in the ImmutableDB; truncating to the fork slot"
+    "$TOOLBIN/db-truncater" --db "$run/db" --truncate-after-slot "$fork_slot" \
+      --config "$run/chain/config.json"
+    rm -rf "${run:?}/db/volatile"
+  fi
+  drop_late_snapshots "$run/db" "$fork_slot"
+  local rate; rate=$(rate_str "$(mget "$m" clock.rate)")
+  local ftargs=("$run" --slot "$fork_slot" --fake-monotonic)
+  [ "$rate" != "1" ] && ftargs+=(--rate "$rate")
+  "$SCRIPTS/set-faketime" "${ftargs[@]}"
+  echo "fork '$name' reset to slot $fork_slot"
+}
+
+# ---------------------------------------------------------------- list
+
+cmd_list() {
+  local busy; busy=$(running_forger_dir)
+  printf '%-14s %-9s %-11s %-6s %-8s %s\n' NAME STATE FORK-SLOT RATE BLOCK-EV MANIFEST
+  local d
+  for d in "$RUNS"/run-*/; do
+    [ -d "$d" ] || continue
+    d=${d%/}
+    local name; name=$(basename "$d"); name=${name#run-}
+    local state="stopped"; [ "$busy" = "$d" ] && state="running"
+    if [ -f "$d/manifest.json" ]; then
+      printf '%-14s %-9s %-11s %-6s %-8s %s\n' "$name" "$state" \
+        "$(mget "$d/manifest.json" fork.slot)" \
+        "x$(mget "$d/manifest.json" clock.rate)" \
+        "$(mget "$d/manifest.json" blockEvery)" yes
+    else
+      local slot="-"
+      [ -f "$d/chain/fork.env" ] && slot=$(sed -n 's/^CARDANO_FORK_SLOT=//p' "$d/chain/fork.env")
+      printf '%-14s %-9s %-11s %-6s %-8s %s\n' "$name" "$state" "$slot" - - "no (adopt)"
+    fi
+  done
+}
+
+# ---------------------------------------------------------------- follow
+
+cmd_follow() {
+  local src=${1:?usage: devnet fork follow <manifest path>}
+  case "$src" in
+    http://*|https://*)
+      die "follow <url>: a remote follower is not wired up yet.
+  The follower joins the producer's own network namespace
+  (scripts/follower-node, --network container:$FORGER), which is what keeps
+  the phase-8 isolation property. Reaching a producer on another machine needs
+  a published port and a way to obtain the pre-fork chain, neither of which
+  exists today. Copy the manifest and the chain locally and follow that."
+      ;;
+  esac
+  [ -f "$src" ] || die "no manifest at $src"
+
+  local busy; busy=$(running_forger_dir)
+  [ -n "$busy" ] || die "no producer running; the follower joins its network namespace"
+
+  local name; name=$(mget "$src" name)
+  local fname="$name-follower"
+  local frun; frun=$(resolve_run "$fname")
+  check_memory "$(mget "$src" network)" "follow"
+
+  if [ ! -d "$frun" ]; then
+    local source; source=$(dirname "$(dirname "$src")")
+    echo "building follower run $frun from $(mget "$src" name)"
+    FOLLOWER=1 FORK_NOW=$(python3 -c "$(genesis_py)
+print(f'{slot_to_time($(mget "$src" fork.slot) + 10):%Y-%m-%dT%H:%M:%SZ}')" \
+      "$busy/chain/shelley-genesis.json") \
+      GOLDEN_DB=${GOLDEN_DB:-/mnt/cardano/preview} RUNS_DIR=$RUNS CARDANO_CLI_BIN=$CLI \
+      "$SCRIPTS/new-isolated-run" "$fname" "$(mget "$src" fork.slot)"
+  fi
+
+  # The follower starts second, and libfaketime anchors a speed-up at process
+  # start, so equal targets would leave its clock BEHIND the forger's and every
+  # block it received would look like a block from the future. Lead it.
+  local lead=${FOLLOWER_LEAD_SLOTS:-400}
+  local rate; rate=$(rate_str "$(mget "$src" clock.rate)")
+  local base; base=$(last_slot "$busy")
+  local ftargs=("$frun" --slot "$base" --fake-monotonic)
+  [ "$rate" != "1" ] && ftargs+=(--rate "$rate")
+  LEAD_SECONDS=$lead "$SCRIPTS/set-faketime" "${ftargs[@]}"
+  echo "follower clock led by $lead slots (rate x$rate)"
+  "$SCRIPTS/follower-node" start "$frun"
+}
+
+# ---------------------------------------------------------------- dispatch
+
+cmd=${1:-}; shift || true
+case "$cmd" in
+  create) cmd_create "$@" ;;
+  adopt)  cmd_adopt "$@" ;;
+  start)  cmd_start "$@" ;;
+  stop)   cmd_stop "$@" ;;
+  status) cmd_status "$@" ;;
+  reset)  cmd_reset "$@" ;;
+  list)   cmd_list "$@" ;;
+  follow) cmd_follow "$@" ;;
+  ""|-h|--help|help) usage 0 ;;
+  *) echo "devnet fork: unknown subcommand '$cmd'" >&2; usage ;;
+esac
