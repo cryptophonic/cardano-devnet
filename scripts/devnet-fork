@@ -13,6 +13,7 @@
 #   devnet fork start <n> [--rate R]   # start the producer
 #   devnet fork stop [<n>]
 #   devnet fork status [<n>]
+#   devnet fork warp <n> --to-slot S | --to-epoch E [--rate R]
 #   devnet fork reset <n>              # back to the fork point
 #   devnet fork list
 #   devnet fork follow <manifest path> # start a follower beside the producer
@@ -202,6 +203,49 @@ t = json.load(sys.stdin)
 print(t['slot'], t['hash'], t['block'])" <<<"$tip"
 }
 
+# Is this run's clock in stamp-file mode (changeable while it runs) or baked
+# into FAKETIME at process start (needs a restart)?
+stamp_mode() {
+  grep -q '^FAKETIME_TIMESTAMP_FILE=' "$1/chain/faketime.env" 2>/dev/null
+}
+
+# Set a RUNNING (or stopped) run's clock to a given slot. A stamp write is
+# absolute, not an increment: it re-anchors the speed-up at the moment the node
+# reads the file, so the value written is "the clock is this, now".
+write_stamp() {
+  local run=$1 slot=$2 rate=$3
+  python3 -c "$(genesis_py)
+import sys
+spec = f'@{slot_to_time($slot):%Y-%m-%d %H:%M:%S}'
+if '$rate' not in ('', '1'): spec += ' x$rate'
+open(sys.argv[2] + '/chain/faketime.stamp', 'w').write(spec + chr(10))
+print(spec)" "$run/chain/shelley-genesis.json" "$run"
+}
+
+# The forger's own faked clock, as a slot. Its last 'Chain extended' line is a
+# fair proxy because a forger emits one every BLOCK_EVERY slots -- this is NOT a
+# general way to read any node's clock (a quiet node's last line is stale, and a
+# child process re-anchors the multiplier and reports the bare anchor).
+forger_clock_slot() {
+  local run=$1 line ts
+  line=$(docker logs "$FORGER" 2>&1 | sed 's/\x1b\[[0-9;]*m//g' \
+         | grep -a 'Chain extended' | tail -1)
+  ts=$(echo "$line" | grep -oE '^\[[0-9-]+ [0-9:.]+Z\]' | tr -d '[]Z')
+  [ -n "$ts" ] || return 1
+  python3 -c "$(genesis_py)
+import datetime
+c = datetime.datetime.strptime('$ts'.strip(), '%Y-%m-%d %H:%M:%S.%f').replace(tzinfo=datetime.timezone.utc)
+print(int((c - START).total_seconds() / SLOT_LEN))" "$run/chain/shelley-genesis.json"
+}
+
+# The live tip slot, asked of the node rather than read from its log.
+live_tip_slot() {
+  "$SCRIPTS/isolated-node" cli latest query tip --testnet-magic "$1" 2>/dev/null \
+    | python3 -c "import json,sys
+try: print(json.load(sys.stdin)['slot'])
+except Exception: pass"
+}
+
 # ---------------------------------------------------------------- create
 
 cmd_create() {
@@ -356,7 +400,9 @@ drop_late_snapshots() {
 # CLOCK_MONOTONIC is faked along with the wall clock.
 apply_rate() {
   local run=$1 rate=$2 slot=$3
-  local args=("$run" --slot "$slot" --fake-monotonic)
+  # --stamp: the clock spec goes in a file the node re-reads, so `warp` can move
+  # it without a restart and a follower can be synchronised after it is up.
+  local args=("$run" --slot "$slot" --fake-monotonic --stamp)
   [ "$rate" != "1" ] && args+=(--rate "$rate")
   "$SCRIPTS/set-faketime" "${args[@]}"
 
@@ -431,14 +477,19 @@ cmd_adopt() {
   # record the current tip's hash, which is a different block.
   local hash=""
 
-  local rate=1 anchor=""
-  if [ -f "$run/chain/faketime.env" ]; then
-    local ft; ft=$(sed -n 's/^FAKETIME=//p' "$run/chain/faketime.env")
+  local rate=1 anchor="" ft=""
+  if [ -f "$run/chain/faketime.stamp" ]; then
+    # stamp-file mode: the spec is the stamp, not a FAKETIME= line
+    ft=$(cat "$run/chain/faketime.stamp")
+  elif [ -f "$run/chain/faketime.env" ]; then
+    ft=$(sed -n 's/^FAKETIME=//p' "$run/chain/faketime.env")
+  fi
+  if [ -n "$ft" ]; then
     anchor=${ft%% x*}
     case "$ft" in *' x'*) rate=${ft##* x} ;; esac
   else
-    "$SCRIPTS/set-faketime" "$run" --slot "$slot" --fake-monotonic >/dev/null
-    echo "no faketime.env: wrote one anchored at the fork slot (Arm 2, x1)"
+    "$SCRIPTS/set-faketime" "$run" --slot "$slot" --fake-monotonic --stamp >/dev/null
+    echo "no clock config: wrote one anchored at the fork slot (Arm 2, x1, stamp mode)"
   fi
 
   local network; network=$(guess_network "$run/chain/shelley-genesis.json")
@@ -482,7 +533,12 @@ if os.path.exists(run + '/chain/faketime.env'):
         if '=' in line:
             k, v = line.rstrip('\n').split('=', 1)
             faketime[k] = v
-ft = faketime.get('FAKETIME', '')
+# in stamp-file mode the spec lives in faketime.stamp, not in faketime.env
+stampf = run + '/chain/faketime.stamp'
+if os.path.exists(stampf):
+    ft = open(stampf).read().strip()
+else:
+    ft = faketime.get('FAKETIME', '')
 anchor, _, _r = ft.partition(' x')
 slot = int(os.environ['M_SLOT'])
 m = {
@@ -511,6 +567,8 @@ m = {
     'anchor': anchor, 'rate': float(os.environ['M_RATE']),
     'fakeMonotonic': faketime.get('FAKETIME_DONT_FAKE_MONOTONIC') == '0',
     'anchorSlot': slot,
+    # 'stamp' can be changed while the node runs; 'env' needs a restart
+    'mode': 'stamp' if os.path.exists(stampf) else 'env',
   },
   # null on a follower: it carries the fork gates so it accepts the forged
   # blocks, but must not have the cadence or it would forge too
@@ -557,6 +615,12 @@ cmd_start() {
     rate=$(rate_str "$rate")
     local be; be=$(block_every_for_rate "$rate")
     echo "rate x$rate: blockEvery $be, mempool timeouts x$rate"
+    # Manifest first: this mutates three files, and an interruption part-way
+    # used to leave the run configured one way and claiming another.
+    python3 -c "
+import json,sys
+m=json.load(open(sys.argv[1])); m['clock']['rate']=float(sys.argv[2]); m['blockEvery']=int(sys.argv[3])
+json.dump(m,open(sys.argv[1],'w'),indent=2)" "$m" "$rate" "$be"
     if grep -q '^CARDANO_FORK_BLOCK_EVERY=' "$run/chain/fork.env"; then
       sed -i "s/^CARDANO_FORK_BLOCK_EVERY=.*/CARDANO_FORK_BLOCK_EVERY=$be/" "$run/chain/fork.env"
     else
@@ -565,11 +629,13 @@ cmd_start() {
     apply_rate "$run" "$rate" "$(last_slot "$run")"
     python3 -c "
 import json,sys
-m=json.load(open(sys.argv[1])); m['clock']['rate']=float(sys.argv[2]); m['blockEvery']=int(sys.argv[3])
-ft=dict(l.rstrip('\n').split('=',1) for l in open(sys.argv[4]) if '=' in l)
-m['clock']['anchor']=ft.get('FAKETIME','').split(' x')[0]
-json.dump(m,open(sys.argv[1],'w'),indent=2)
-" "$m" "$rate" "$be" "$run/chain/faketime.env"
+m=json.load(open(sys.argv[1]))
+ft=dict(l.rstrip(chr(10)).split('=',1) for l in open(sys.argv[2]) if '=' in l)
+st=sys.argv[3]
+import os
+if os.path.exists(st): m['clock']['anchor']=open(st).read().strip().split(' x')[0]
+else: m['clock']['anchor']=ft.get('FAKETIME','').split(' x')[0]
+json.dump(m,open(sys.argv[1],'w'),indent=2)" "$m" "$run/chain/faketime.env" "$run/chain/faketime.stamp"
   fi
 
   check_kes "$run" "$m"
@@ -583,8 +649,16 @@ check_kes() {
   python3 -c "$(genesis_py)
 import datetime, json, os
 m = json.load(open(sys.argv[2]))
-ft = dict(l.rstrip('\n').split('=',1) for l in open(sys.argv[3]) if '=' in l)
-anchor = ft.get('FAKETIME','').split(' x')[0].lstrip('@')
+# stamp-file mode keeps the spec in faketime.stamp; env mode in FAKETIME=
+if os.path.exists(sys.argv[4]):
+    spec = open(sys.argv[4]).read().strip()
+else:
+    ft = dict(l.rstrip(chr(10)).split('=',1) for l in open(sys.argv[3]) if '=' in l)
+    spec = ft.get('FAKETIME','')
+anchor = spec.split(' x')[0].lstrip('@')
+if not anchor:
+    raise SystemExit('devnet fork: no clock configured for this run '
+                     '(neither chain/faketime.stamp nor FAKETIME= in chain/faketime.env)')
 now = datetime.datetime.strptime(anchor, '%Y-%m-%d %H:%M:%S').replace(tzinfo=datetime.timezone.utc)
 slot = int((now - START).total_seconds() / SLOT_LEN)
 period = kes_of(slot)
@@ -597,7 +671,7 @@ if not (issued <= period < issued + KES_MAX):
       f\"  Reissue with FORK_NOW at the target instant, or warp less far.\")
 print(f'KES: opcert period {issued}, faked clock in period {period}, '
       f'{issued + KES_MAX - period} of {KES_MAX} periods remaining -- ok')
-" "$run/chain/shelley-genesis.json" "$m" "$run/chain/faketime.env"
+" "$run/chain/shelley-genesis.json" "$m" "$run/chain/faketime.env" "$run/chain/faketime.stamp"
 }
 
 # The run's own last forged slot: its container log if it is the one that ran,
@@ -656,7 +730,9 @@ rate = m['clock']['rate']
 anchor = m['clock']['anchor'].lstrip('@')
 print(f\"fork        {m['name']}  ({m['network']}, magic {m['networkMagic']})\")
 print(f\"state       {os.environ['STATUS_STATE']}\")
-print(f\"fork point  slot {m['fork']['slot']}  epoch {m['fork']['epoch']}  {m['fork']['hash'][:16]}...\")
+h = m['fork']['hash']
+print(f\"fork point  slot {m['fork']['slot']}  epoch {m['fork']['epoch']}  \"
+      f\"{h[:16] + '...' if h else '(hash not recorded)'}\")
 print(f\"role        {m.get('role','producer')}\")
 print(f\"rate        x{rate:g}   blockEvery {m['blockEvery'] or '- (not forging)'}   \"
       f\"{'CLOCK_MONOTONIC faked (Arm 2)' if m['clock']['fakeMonotonic'] else 'Arm 1 -- WRONG ARM'}\")
@@ -674,6 +750,140 @@ if tip:
 else:
     print('tip         (not running -- start it to query the tip)')
 " "$run/chain/shelley-genesis.json" "$m"
+}
+
+# ---------------------------------------------------------------- warp
+
+# Warp does NOT skip the tip ahead. The ledger can only forecast ~3k/f slots
+# past its tip, so a clock planted beyond that fails leadership checks
+# (NoLedgerView / CurrentSlotUnknown), and whether a node absorbs a forward
+# clock jump at all is untested -- see fork-mode-clock-signal.md 10d. So the
+# chain forges through the distance at its cadence, and the cost of a warp is
+# real time: (target - tip) / rate seconds. Raising the rate is the way to make
+# a warp cheaper.
+cmd_warp() {
+  local name=${1:?usage: devnet fork warp <n> --to-slot S | --to-epoch E [--rate R]}; shift || true
+  local to_slot="" to_epoch="" rate=""
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --to-slot)  to_slot=${2:?}; shift 2 ;;
+      --to-epoch) to_epoch=${2:?}; shift 2 ;;
+      --rate)     rate=${2:?}; shift 2 ;;
+      *) die "warp: unknown argument $1" ;;
+    esac
+  done
+  local run; run=$(resolve_run "$name")
+  local m; m=$(require_manifest "$name")
+  [ -n "$to_slot$to_epoch" ] || die "warp: one of --to-slot or --to-epoch is required"
+  [ -n "$to_slot" ] && [ -n "$to_epoch" ] && die "warp: --to-slot and --to-epoch are exclusive"
+
+  local magic; magic=$(mget "$m" networkMagic)
+  [ "$(running_forger_dir)" = "$run" ] || die "fork '$name' is not running.
+  A warp needs the chain to advance through the distance, so start it first:
+    devnet fork start $name"
+
+  local tip; tip=$(live_tip_slot "$magic")
+  [ -n "$tip" ] || die "could not read the tip from the running node"
+
+  local target
+  if [ -n "$to_epoch" ]; then
+    target=$(python3 -c "import json,sys; print(int(sys.argv[2]) * json.load(open(sys.argv[1]))['epochLength'])" \
+               "$run/chain/shelley-genesis.json" "$to_epoch")
+  else
+    target=$to_slot
+  fi
+  [ "$target" -gt "$tip" ] || die "warp: refusing to go backwards (tip $tip, target $target).
+  A fork can only move forward; use 'devnet fork reset $name' to return to the fork point."
+
+  local old_rate; old_rate=$(rate_str "$(mget "$m" clock.rate)")
+  [ -n "$rate" ] || rate=$old_rate
+  rate=$(rate_str "$rate")
+  local be; be=$(block_every_for_rate "$rate")
+
+  # KES first: the opcert is checked against the node's own (faked) clock, and
+  # reissuing it needs a restart, so refuse before changing anything.
+  python3 - "$run/chain/shelley-genesis.json" "$m" "$target" <<'KESPY'
+import json, sys
+g = json.load(open(sys.argv[1]))
+m = json.load(open(sys.argv[2]))
+target = int(sys.argv[3])
+kes_max = g['maxKESEvolutions']
+period = target // g['slotsPerKESPeriod']
+issued = m['producer']['opcertKesPeriod']
+if not (issued <= period < issued + kes_max):
+    sys.exit(
+        "devnet fork: warp target slot %d is in KES period %d, outside the "
+        "opcert's %d..%d.\n"
+        "  Reissuing the opcert needs a restart; warp less far, or recreate the run."
+        % (target, period, issued, issued + kes_max - 1))
+print("KES: target period %d, opcert covers %d..%d -- ok"
+      % (period, issued, issued + kes_max - 1))
+KESPY
+
+  python3 - "$run/chain/shelley-genesis.json" "$tip" "$target" "$rate" <<'PLANPY'
+import json, sys
+g = json.load(open(sys.argv[1]))
+tip, target, rate = int(sys.argv[2]), int(sys.argv[3]), float(sys.argv[4])
+el = g['epochLength']
+print("warp  slot %d -> %d   epoch %d -> %d" % (tip, target, tip // el, target // el))
+print("      %d slots at x%g = %.0f real seconds" % (target - tip, rate, (target - tip) / rate))
+print("      the chain forges through this; the clock cannot skip past its own tip")
+PLANPY
+
+  # Manifest FIRST, so an interruption leaves the run claiming what it is about
+  # to become rather than silently disagreeing with its own files.
+  python3 -c "
+import json,sys
+m=json.load(open(sys.argv[1])); m['clock']['rate']=float(sys.argv[2]); m['blockEvery']=int(sys.argv[3])
+m['clock']['warpTarget']=int(sys.argv[4])
+json.dump(m,open(sys.argv[1],'w'),indent=2)" "$m" "$rate" "$be" "$target"
+
+  stamp_mode "$run" || die "fork '$name' has its clock baked into FAKETIME, so the rate
+  cannot be changed while it runs. Recreate it with a current 'devnet fork create'
+  (which uses stamp-file mode), or stop it, run
+    set-faketime $run --slot <its last forged slot> --rate $rate --fake-monotonic --stamp
+  and start it again."
+
+  # A rate change is a stamp write at the CURRENT tip with the new multiplier;
+  # the cadence gate has to move with it or the chain would run at the wrong
+  # blocks/s. BLOCK_EVERY is read at node start, so it takes effect next start.
+  # Only touch the clock if the rate actually changed. A needless stamp write
+  # re-anchors the speed-up at the read, which can move the clock BACKWARDS
+  # relative to where it had run to (fork-mode-clock-signal.md 10d).
+  if [ "$rate" != "$old_rate" ]; then
+    if grep -q '^CARDANO_FORK_BLOCK_EVERY=' "$run/chain/fork.env"; then
+      sed -i "s/^CARDANO_FORK_BLOCK_EVERY=.*/CARDANO_FORK_BLOCK_EVERY=$be/" "$run/chain/fork.env"
+    fi
+    echo "clock -> $(write_stamp "$run" "$tip" "$rate")"
+    echo "note: BLOCK_EVERY=$be is read at node start, so the cadence changes on the next start"
+  fi
+
+  # Now wait for the chain to reach the target.
+  local deadline=$(( SECONDS + ${WARP_TIMEOUT:-3600} ))
+  local last=$tip
+  while [ "$SECONDS" -lt "$deadline" ]; do
+    tip=$(live_tip_slot "$magic")
+    [ -n "$tip" ] || { sleep 5; continue; }
+    [ "$tip" -ge "$target" ] && break
+    if [ $(( tip - last )) -ge 2000 ]; then
+      echo "  ... slot $tip  ($(( target - tip )) to go)"
+      last=$tip
+    fi
+    sleep 5
+  done
+  [ "$tip" -ge "$target" ] || die "warp timed out at slot $tip (target $target).
+  Raise WARP_TIMEOUT, or the rate."
+
+  python3 - "$run/chain/shelley-genesis.json" "$tip" <<'ARRPY'
+import json, sys
+g = json.load(open(sys.argv[1]))
+tip = int(sys.argv[2])
+print("arrived  slot %d  epoch %d" % (tip, tip // g['epochLength']))
+ARRPY
+  python3 -c "
+import json,sys
+m=json.load(open(sys.argv[1])); m['clock'].pop('warpTarget',None)
+json.dump(m,open(sys.argv[1],'w'),indent=2)" "$m"
 }
 
 # ---------------------------------------------------------------- reset
@@ -766,17 +976,30 @@ print(f'{slot_to_time($(mget "$src" fork.slot) + 10):%Y-%m-%dT%H:%M:%SZ}')" \
       "$SCRIPTS/new-isolated-run" "$fname" "$(mget "$src" fork.slot)"
   fi
 
-  # The follower starts second, and libfaketime anchors a speed-up at process
-  # start, so equal targets would leave its clock BEHIND the forger's and every
-  # block it received would look like a block from the future. Lead it.
-  local lead=${FOLLOWER_LEAD_SLOTS:-400}
+  # The follower's clock is set AFTER it is up, from the forger's actual clock.
+  # Guessing a lead before startup is a race: measured launch skew was 21.6 real
+  # seconds, which at x100 is 2157 slots against a 400-slot lead, and a follower
+  # whose clock sits behind the chain rejects every block it receives and thrashes
+  # its one peer connection (fork-mode-clock-signal.md 10e).
   local rate; rate=$(rate_str "$(mget "$src" clock.rate)")
-  local base; base=$(last_slot "$busy")
-  local ftargs=("$frun" --slot "$base" --fake-monotonic)
+  local ftargs=("$frun" --slot "$(mget "$src" fork.slot)" --fake-monotonic --stamp)
   [ "$rate" != "1" ] && ftargs+=(--rate "$rate")
-  LEAD_SECONDS=$lead "$SCRIPTS/set-faketime" "${ftargs[@]}"
-  echo "follower clock led by $lead slots (rate x$rate)"
+  "$SCRIPTS/set-faketime" "${ftargs[@]}" >/dev/null
   "$SCRIPTS/follower-node" start "$frun"
+
+  # Now synchronise. A stamp write is absolute and re-anchors at the read, so the
+  # value to write is the forger's clock NOW plus headroom -- not an offset added
+  # to wherever the follower had got to.
+  local margin=${FOLLOWER_MARGIN_SLOTS:-600}
+  local fc deadline=$(( SECONDS + 120 ))
+  while [ "$SECONDS" -lt "$deadline" ]; do
+    fc=$(forger_clock_slot "$busy" 2>/dev/null || true)
+    [ -n "$fc" ] && break
+    sleep 3
+  done
+  [ -n "$fc" ] || die "could not read the forger's clock to synchronise the follower"
+  echo "sync: forger clock at slot $fc, follower clock -> $(write_stamp "$frun" "$(( fc + margin ))" "$rate") (+$margin margin)"
+  echo "      re-run 'devnet fork follow' to re-synchronise if it drifts"
 }
 
 # ---------------------------------------------------------------- dispatch
@@ -788,6 +1011,7 @@ case "$cmd" in
   start)  cmd_start "$@" ;;
   stop)   cmd_stop "$@" ;;
   status) cmd_status "$@" ;;
+  warp)   cmd_warp "$@" ;;
   reset)  cmd_reset "$@" ;;
   list)   cmd_list "$@" ;;
   follow) cmd_follow "$@" ;;

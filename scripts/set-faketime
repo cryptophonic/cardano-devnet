@@ -20,6 +20,19 @@
 #                       hour costs a real minute at X=60. libfaketime anchors the
 #                       speed-up at process start, so the node sees
 #                       target + X*(real seconds since it started).
+#   --stamp             put the clock spec in <run dir>/chain/faketime.stamp and
+#                       point libfaketime at it (FAKETIME_TIMESTAMP_FILE) instead
+#                       of baking it into FAKETIME. The node re-reads that file
+#                       while it runs, so the clock can be changed WITHOUT a
+#                       restart -- which is what `devnet fork warp` uses, and what
+#                       lets a follower be synchronised after it is already up
+#                       rather than guessing a lead. See
+#                       test/fixtures/fork-mode-clock-signal.md.
+#                       Note a rewrite RE-ANCHORS the speed-up at the moment the
+#                       file is read, so a stamp is "the clock is X now", not an
+#                       offset to add to wherever the clock had got to.
+#                       Never combine with FAKETIME_NO_CACHE: that re-reads on
+#                       every clock call and hangs cardano-node (fixture 10b).
 #   --fake-monotonic    also accelerate CLOCK_MONOTONIC (default: leave it real).
 #                       CLOCK_MONOTONIC is what consensus and the mux build their
 #                       timers on, so this is the knob that decides whether the
@@ -53,10 +66,13 @@ out=$rundir/chain/faketime.env
 
 slot=
 rate=
+stamp=
 dont_fake_monotonic=1
+stampfile=$rundir/chain/faketime.stamp
 while [ $# -gt 0 ]; do
   case "$1" in
-    --clear) rm -f "$out"; echo "removed $out (real clock)"; exit 0 ;;
+    --clear) rm -f "$out" "$stampfile"; echo "removed $out (real clock)"; exit 0 ;;
+    --stamp) stamp=1; shift ;;
     --slot)  slot=${2:?--slot needs a slot number}; shift 2 ;;
     --rate)  rate=${2:?--rate needs a multiplier}; shift 2 ;;
     --fake-monotonic) dont_fake_monotonic=0; shift ;;
@@ -84,12 +100,27 @@ print(f'@{t:%Y-%m-%d %H:%M:%S}')
 # libfaketime spells a speed-up as a trailing " x<rate>" on the FAKETIME string
 [ -n "$rate" ] && faketime="$faketime x$rate"
 
-cat > "$out" <<EOF
+if [ -n "$stamp" ]; then
+  # The spec lives in a file the node re-reads, so a later write moves a RUNNING
+  # node's clock. CACHE_DURATION bounds how stale a read may be; NO_CACHE would
+  # re-read on every clock call and hangs the node.
+  echo "$faketime" > "$stampfile"
+  cat > "$out" <<EOF
+LD_PRELOAD=/opt/faketime/libfaketime.so.1
+FAKETIME_TIMESTAMP_FILE=/rundir/chain/faketime.stamp
+FAKETIME_CACHE_DURATION=${FAKETIME_CACHE_DURATION:-2}
+FAKETIME_DONT_FAKE_MONOTONIC=$dont_fake_monotonic
+EOF
+  echo "wrote $stampfile:"; sed 's/^/  /' "$stampfile"
+  echo "wrote $out:"; sed 's/^/  /' "$out"
+else
+  cat > "$out" <<EOF
 LD_PRELOAD=/opt/faketime/libfaketime.so.1
 FAKETIME=$faketime
 FAKETIME_DONT_FAKE_MONOTONIC=$dont_fake_monotonic
 EOF
-echo "wrote $out:"
-sed 's/^/  /' "$out"
+  echo "wrote $out:"; sed 's/^/  /' "$out"
+fi
 echo "(from slot $slot + ${LEAD}s lead${rate:+, rate x$rate}\
-$([ "$dont_fake_monotonic" = 0 ] && echo ', CLOCK_MONOTONIC faked too'))"
+$([ "$dont_fake_monotonic" = 0 ] && echo ', CLOCK_MONOTONIC faked too')\
+$([ -n "$stamp" ] && echo ', stamp-file mode'))"
