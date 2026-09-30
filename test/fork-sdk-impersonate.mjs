@@ -41,10 +41,8 @@ try {
   console.log(`fork '${fork.name}'  magic ${fork.networkMagic}  fork slot ${fork.forkSlot}`)
   console.log(`god key ${fork.godKeyHash}\n        ${fork.godKeyPath}`)
 
-  const victim = addressArg ?? (fork.manifest.seeds?.some(s => s.role === 'whale')
-    ? fork.seed('whale').address
-    : WHALE)
-  console.log(`victim  ${victim}${addressArg ? '' : fork.manifest.seeds?.length ? '  (from devnet fork seeds)' : '  (hardcoded fallback, no seeds extracted)'}`)
+  const victim = addressArg ?? (fork.manifest.seeds ? fork.seed().address : WHALE)
+  console.log(`victim  ${victim}${addressArg ? '' : fork.manifest.seeds ? '  (biggest extracted seed)' : '  (hardcoded fallback, no seeds extracted)'}`)
 
   const tip = await fork.tip()
   const clock = await fork.now()

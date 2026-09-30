@@ -3,17 +3,20 @@
 //   import { openFork } from './src/fork/index.mjs'
 //
 //   const fork = await openFork('sdk1')
-//   await fork.extractSeeds()               // once per fork; verifies against its ledger
-//   const whale = fork.impersonateSeed('whale')
+//   await fork.extractSeeds()               // once per fork; a real --whole-utxo scan
+//   const whale = fork.impersonateSeed()    // the biggest seed found, index 0
 //   const blaze = await Blaze.from(fork.provider, whale)
 //   const tx = await blaze.newTransaction().payLovelace(someone, 1_000_000_000n).complete()
 //   await fork.submit(await whale.sign(tx))
+//
+//   await fork.generate({ tps: 5, duration: 30 })   // synthetic load over `seeds`
 //
 // Lifecycle calls (warpTo, setRate) wrap scripts/devnet-fork; chain calls go to
 // the fork's ogmios sidecar. Nothing here starts or stops a node except on
 // request: a fork is expensive to build and cheap to reattach to.
 
 import fs from 'fs'
+import path from 'path'
 
 import { Address } from '@blaze-cardano/core'
 
@@ -179,39 +182,61 @@ export class Fork {
   // ---------------------------------------------------------------- seeds
 
   /**
-   * A known-funded test address, previously verified by `devnet fork seeds`.
+   * Every spendable, unencumbered UTxO `devnet fork seeds` found above its
+   * value threshold, sorted by value descending, biggest first.
    *
-   * `manifest.seeds[].lovelace` is a string, not a JSON number: the whale
-   * candidate this usually resolves to holds more than
-   * `Number.MAX_SAFE_INTEGER` lovelace, and a bare JSON number would silently
-   * round under a plain `JSON.parse` the same way it did in `Ogmios.mjs`
-   * before `src/fork/ogmios.mjs` existed (fork-mode-sdk.md 11b).
-   * @param {string} [role='whale']
-   * @returns {{ address: string, role: string, utxo: string, lovelace: bigint }}
+   * Reads `<runDir>/seeds.json` directly rather than `manifest.seeds` (which
+   * is only a summary -- `{file, count, minAda, extractedAt}` -- because the
+   * full list can run into the thousands of entries on a real chain and
+   * doesn't belong embedded in the manifest). `lovelace` is a string in the
+   * file for the same reason it is everywhere else in this SDK: the biggest
+   * entries on a real chain exceed `Number.MAX_SAFE_INTEGER`, and a bare JSON
+   * number would round under a plain `JSON.parse` the way it did in
+   * `Ogmios.mjs` before `src/fork/ogmios.mjs` existed (fork-mode-sdk.md 11b).
+   * @returns {Array<{ address: string, utxo: string, lovelace: bigint }>}
    */
-  seed(role = 'whale') {
-    const found = (this.manifest.seeds ?? []).find(s => s.role === role)
-    if (!found) {
+  get seeds() {
+    const file = path.join(this.runDir, 'seeds.json')
+    if (!fs.existsSync(file)) {
       throw new Error(
-        `no seed with role '${role}' on fork '${this.name}'. Run ` +
-        `'devnet fork seeds ${this.name}' first, or pass an address to impersonate() directly.`
+        `no seeds.json for fork '${this.name}'. Run 'devnet fork seeds ${this.name}' first.`
       )
     }
-    return { ...found, lovelace: BigInt(found.lovelace) }
+    return JSON.parse(fs.readFileSync(file).toString())
+      .map(s => ({ ...s, lovelace: BigInt(s.lovelace) }))
   }
 
   /**
-   * Verify the checked-in candidate addresses against this fork's own ledger
-   * and record which are still funded. Wraps `devnet fork seeds`.
-   * @param {{ candidates?: string, onOutput?: (chunk: string) => void }} [opts]
-   * @returns {Promise<Array<{ address: string, role: string, utxo: string, lovelace: string }>>}
+   * One seed by rank -- `seed()` (or `seed(0)`) is the single biggest
+   * spendable UTxO this fork has, the "whale" every impersonation fixture
+   * since the god-key phase has used.
+   * @param {number} [n=0] index into `seeds`, 0 = biggest
+   * @returns {{ address: string, utxo: string, lovelace: bigint }}
    */
-  async extractSeeds({ candidates, onOutput } = {}) {
+  seed(n = 0) {
+    const seeds = this.seeds
+    const found = seeds[n]
+    if (!found) {
+      throw new Error(
+        `fork '${this.name}' has only ${seeds.length} seed(s); no entry at index ${n}.`
+      )
+    }
+    return found
+  }
+
+  /**
+   * Extract this fork's spendable UTxOs above a value threshold into
+   * `seeds.json`. Wraps `devnet fork seeds`; see that command for why this is
+   * a real `--whole-utxo` scan rather than a targeted query.
+   * @param {{ minAda?: number, onOutput?: (chunk: string) => void }} [opts]
+   * @returns {Promise<Array<{ address: string, utxo: string, lovelace: bigint }>>}
+   */
+  async extractSeeds({ minAda, onOutput } = {}) {
     const args = ['seeds', this.name]
-    if (candidates) args.push('--candidates', candidates)
-    await devnetFork(args, { onOutput })
+    if (minAda !== undefined) args.push('--seed-min-ada', String(minAda))
+    await devnetFork(args, { onOutput, timeout: 0 })
     this.reload()
-    return this.manifest.seeds ?? []
+    return this.seeds
   }
 
   // ------------------------------------------------------------ impersonation
@@ -231,13 +256,13 @@ export class Fork {
   }
 
   /**
-   * `impersonate(this.seed(role).address)` -- a signer for a known-funded seed
+   * `impersonate(this.seed(n).address)` -- a signer for a known-funded seed
    * address rather than one the caller has to name.
-   * @param {string} [role='whale']
+   * @param {number} [n=0] index into `seeds`, 0 = biggest ("the whale")
    * @returns {ImpersonatedSigner}
    */
-  impersonateSeed(role = 'whale') {
-    return this.impersonate(this.seed(role).address)
+  impersonateSeed(n = 0) {
+    return this.impersonate(this.seed(n).address)
   }
 
   /**
@@ -256,6 +281,20 @@ export class Fork {
       )
     }
     return txId.toString()
+  }
+
+  /**
+   * Synthetic transfer load over `seeds`, at a target rate. Wraps
+   * `src/fork/generate.mjs` (a dynamic import: that module can also run
+   * standalone as `devnet fork generate`'s CLI entry, and importing it
+   * statically here would make a cycle back through `index.mjs`).
+   * @param {{ tps: number, duration: number, shape?: 'transfer'|'fanout'|'mixed',
+   *           amountAda?: number, onTick?: (r: object) => void }} opts
+   * @returns {Promise<object>} see `generateLoad` in generate.mjs
+   */
+  async generate(opts) {
+    const { generateLoad } = await import('./generate.mjs')
+    return generateLoad(this, opts)
   }
 
   async close() {

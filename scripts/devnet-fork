@@ -15,7 +15,8 @@
 #   devnet fork status [<n>]
 #   devnet fork warp <n> --to-slot S | --to-epoch E [--rate R]
 #   devnet fork rate <n> <r>           # change a running fork's clock rate
-#   devnet fork seeds <n> [--candidates <file>]  # verify known-funded test addresses
+#   devnet fork seeds <n> [--seed-min-ada A]      # extract spendable UTxOs >= A ADA to seeds.json
+#   devnet fork generate <n> --tps T --duration D [--shape transfer|fanout|mixed]
 #   devnet fork reset <n>              # back to the fork point
 #   devnet fork list
 #   devnet fork follow <manifest path> # start a follower beside the producer
@@ -837,8 +838,9 @@ h = m['fork']['hash']
 print(f\"fork point  slot {m['fork']['slot']}  epoch {m['fork']['epoch']}  \"
       f\"{h[:16] + '...' if h else '(hash not recorded)'}\")
 print(f\"role        {m.get('role','producer')}\")
-seeds = m.get('seeds') or []
-print(f\"seeds       {', '.join(s['role'] for s in seeds) if seeds else '(none -- devnet fork seeds ' + m['name'] + ')'}\")
+seeds = m.get('seeds')
+print(f\"seeds       {seeds['count']} >= {seeds['minAda']} ADA, extracted {seeds['extractedAt']}\"
+      if seeds else f\"seeds       (none -- devnet fork seeds {m['name']})\")
 print(f\"rate        x{rate:g}   blockEvery {m['blockEvery'] or '- (not forging)'}   \"
       f\"{'CLOCK_MONOTONIC faked (Arm 2)' if m['clock']['fakeMonotonic'] else 'Arm 1 -- WRONG ARM'}\")
 print(f\"clock       anchored at {anchor}\")
@@ -1014,70 +1016,178 @@ json.dump(m,open(sys.argv[1],'w'),indent=2)" "$m" "$rate" "$be"
 
 # ---------------------------------------------------------------- seeds
 
-# A fork inherits a real chain's UTxO set, but nothing hands you a funded
-# address to test with -- unlike local devnet mode, there is no genesis wallet.
-# Rather than scanning the whole UTxO set to find one (the kind of
-# `query ledger-state` that has already cost this host its memory -- see
-# fork-mode-sdk.md 11e), this checks a short, checked-in list of candidate
-# addresses against the fork's own live ledger and records which are still
-# funded. It verifies, it does not discover.
+# Calibrated 2026-09-30 against preview's real UTxO set (3,192,387 entries):
+# 10,000 ADA hit 20,000+ qualifying entries (the safety cap); 100,000 ADA gave
+# 1,428; 1,000,000 gave 639 -- a practical size for `generate`'s round-robin
+# without being so large it is mostly test-wallet noise.
+DEFAULT_SEED_MIN_ADA=1000000
+
+# Extract a fork's spendable, unencumbered UTxOs above a value threshold into
+# <run>/seeds.json, for `devnet fork generate` to draw from (and for tests
+# wanting a known-funded address without hardcoding one).
+#
+# Preview's live `--whole-utxo` dump is not small: measured 2026-09-30 against
+# the real chain, it is ~2.8 GB / several million entries -- cardano-cli's own
+# --help calls --whole-utxo "only appropriate on small testnets", and preview,
+# after years of use, no longer qualifies. The dump itself is fine: it streams
+# straight to disk via cardano-cli's own --out-file (client RSS stayed
+# ~300MB; the NODE's RSS roughly doubled while serving it, ~1.8 -> ~3.7GB,
+# bounded and temporary, not the runaway `query ledger-state` failure mode of
+# fork-mode-sdk.md 11e). What must never happen is parsing that file back with
+# a plain `json.load()`, which would try to materialize a Python object graph
+# for every one of those millions of entries at once. jq is not a safe
+# substitute either: jq 1.6 (this host) silently rounds any lovelace figure
+# above 2^53 through its internal double -- the same failure mode fixture 11b
+# found in JSON.parse, just one layer further down the pipeline.
+#
+# So the scan below is hand-written: a compiled regex finds each top-level
+# "<txhash>#<ix>": key (cardano's key shape is fixed and regular), and
+# json.JSONDecoder.raw_decode -- the stdlib's own C-accelerated scanner --
+# reads just that one entry's value off a small rolling buffer, exactly (An
+# `int`, arbitrary precision, same as fixture 12's `str(lovelace)` trick).
+# Memory is bounded by one read chunk plus however many entries pass the
+# filter -- never by the size of the whole dump.
+extract_seeds() {
+  local run=$1 magic=$2 min_ada=${3:-$DEFAULT_SEED_MIN_ADA}
+  local raw="$run/seeds-raw.json" out="$run/seeds.json"
+  rm -f "$raw"
+  echo "dumping the whole UTxO set (this can take a while and multiple GB on a live chain)..."
+  "$SCRIPTS/isolated-node" cli --run "$run" latest query utxo --whole-utxo \
+    --testnet-magic "$magic" --output-json --out-file /rundir/seeds-raw.json
+  [ -s "$raw" ] || die "seeds: --whole-utxo produced no file (or an empty one) at $raw"
+  echo "  raw dump: $(du -h "$raw" | cut -f1)"
+
+  python3 - "$raw" "$out" "$min_ada" <<'SEEDSPY'
+import heapq, json, re, sys
+
+raw_path, out_path, min_ada = sys.argv[1], sys.argv[2], int(sys.argv[3])
+min_lovelace = min_ada * 1_000_000
+
+BECH32_CHARSET = "qpzry9x8gf2tvdw0s3jn54khce6mua7l"
+
+def payment_is_keyhash(addr):
+    # Shelley base/pointer/enterprise addresses with a KeyHash payment
+    # credential (CIP-19 header nibble 0, 2, 4 or 6). Byron (base58, no '1'
+    # separator in the bech32 sense) and stake/reward addresses (HRP
+    # "stake"/"stake_test") are excluded by the prefix check alone.
+    if not (addr.startswith('addr_test1') or addr.startswith('addr1')):
+        return False
+    data = addr[addr.rfind('1') + 1:-6]  # drop hrp+separator and the 6-char checksum
+    try:
+        values = [BECH32_CHARSET.index(c) for c in data]
+    except ValueError:
+        return False
+    acc = bits = 0
+    for v in values:
+        acc = (acc << 5) | v
+        bits += 5
+        if bits >= 8:
+            return ((acc >> (bits - 8)) & 0xFF) >> 4 in (0, 2, 4, 6)
+    return False
+
+KEY_RE = re.compile(r'"([0-9a-f]{64}#\d+)":\s*')
+decoder = json.JSONDecoder()
+CHUNK = 32 * 1024 * 1024
+SAFETY_CAP = 20000
+
+# A min-heap of the SAFETY_CAP biggest qualifying entries seen so far, keyed
+# by lovelace. cardano-cli's --whole-utxo order is not sorted by value, so a
+# first-come-first-served cap would keep an arbitrary subset rather than the
+# actual biggest ones -- and `Fork.seed(0)` promises "the biggest", not "one
+# of the biggest that happened to come early in the dump".
+heap = []
+qualifying = 0
+scanned = 0
+buf = ''
+with open(raw_path, 'r') as f:
+    while True:
+        chunk = f.read(CHUNK)
+        eof = not chunk
+        buf += chunk
+        pos = 0
+        while True:
+            m = KEY_RE.search(buf, pos)
+            if not m:
+                break
+            try:
+                entry, end = decoder.raw_decode(buf, m.end())
+            except ValueError:
+                break  # incomplete at this chunk's tail -- wait for more data
+            pos = end
+            scanned += 1
+            if entry.get('datumhash') or entry.get('inlineDatum') or \
+               entry.get('inlineDatumRaw') or entry.get('referenceScript'):
+                continue
+            lovelace = entry.get('value', {}).get('lovelace', 0)
+            if lovelace < min_lovelace:
+                continue
+            addr = entry.get('address', '')
+            if not payment_is_keyhash(addr):
+                continue
+            qualifying += 1
+            candidate = (lovelace, addr, m.group(1))
+            if len(heap) < SAFETY_CAP:
+                heapq.heappush(heap, candidate)
+            elif lovelace > heap[0][0]:
+                heapq.heapreplace(heap, candidate)
+        buf = buf[pos:]
+        if eof:
+            break
+
+results = [{'address': addr, 'utxo': utxo, 'lovelace': str(lovelace)}
+           for lovelace, addr, utxo in sorted(heap, reverse=True)]
+json.dump(results, open(out_path, 'w'), indent=2)
+print(f'  scanned {scanned} utxo(s); {qualifying} qualify '
+      f'(>= {min_ada} ADA, key-hash payment, no datum/script)'
+      + (f'; kept the {SAFETY_CAP} biggest (raise --seed-min-ada to keep them all)'
+         if qualifying > SAFETY_CAP else ''))
+SEEDSPY
+
+  rm -f "$raw"
+}
+
 cmd_seeds() {
-  local name=${1:?usage: devnet fork seeds <n> [--candidates <file>]}; shift || true
-  local candidates=""
+  local name=${1:?usage: devnet fork seeds <n> [--seed-min-ada A]}; shift || true
+  local min_ada=$DEFAULT_SEED_MIN_ADA
   while [ $# -gt 0 ]; do
     case "$1" in
-      --candidates) candidates=${2:?}; shift 2 ;;
+      --seed-min-ada) min_ada=${2:?}; shift 2 ;;
       *) die "seeds: unknown argument $1" ;;
     esac
   done
   local run; run=$(resolve_run "$name")
   local m; m=$(require_manifest "$name")
-  fork_running "$run" || die "fork '$name' is not running. Seeds are verified against
+  fork_running "$run" || die "fork '$name' is not running. Seeds are extracted from
   the fork's own live ledger state:
     devnet fork start $name"
-
-  local network; network=$(mget "$m" network)
-  [ -n "$candidates" ] || candidates="$DEVNET_ROOT/config/fork-seed-candidates/$network.json"
-  [ -f "$candidates" ] || die "seeds: no candidate file for network '$network'
-  (looked at $candidates; pass --candidates <file> to use another)"
   local magic; magic=$(mget "$m" networkMagic)
 
+  extract_seeds "$run" "$magic" "$min_ada"
+
   python3 -c "
-import json, subprocess, sys
+import datetime, json, sys
+m = json.load(open(sys.argv[1]))
+seeds = json.load(open(sys.argv[2]))
+m['seeds'] = {'file': 'seeds.json', 'count': len(seeds), 'minAda': int(sys.argv[3]),
+              'extractedAt': datetime.datetime.now(datetime.timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')}
+json.dump(m, open(sys.argv[1], 'w'), indent=2)
+" "$m" "$run/seeds.json" "$min_ada"
+  echo "written to $run/seeds.json (indexed in $m)"
+}
 
-candidates_path, manifest_path, run, magic, isolated_node = sys.argv[1:6]
-candidates = json.load(open(candidates_path))
-seeds = []
-for c in candidates:
-    addr, role = c['address'], c.get('role', 'seed')
-    out = subprocess.run(
-        [isolated_node, 'cli', '--run', run, 'latest', 'query', 'utxo',
-         '--address', addr, '--testnet-magic', magic, '--output-json'],
-        capture_output=True, text=True)
-    # cardano-cli's own JSON keeps a large lovelace figure as an exact integer
-    # literal; Python's json module reads that as an arbitrary-precision int,
-    # unlike JS's Number -- see fork-mode-sdk.md 11b for what happens when a
-    # quantity like this instead goes through JSON.parse.
-    utxos = json.loads(out.stdout or '{}') if out.returncode == 0 else {}
-    if not utxos:
-        print(f'  {role:<10} {addr}: no funds, skipping')
-        continue
-    txin, o = max(utxos.items(), key=lambda kv: kv[1]['value']['lovelace'])
-    lovelace = o['value']['lovelace']
-    # stringified on the way into manifest.json -- a bare JSON number here would
-    # hit the exact same rounding once src/fork/cli.mjs's plain JSON.parse reads
-    # it back on the JS side.
-    seeds.append({'address': addr, 'role': role, 'utxo': txin, 'lovelace': str(lovelace)})
-    print(f'  {role:<10} {addr}: funded, {txin} ({lovelace} lovelace)')
+# ---------------------------------------------------------------- generate
 
-if not seeds:
-    sys.exit(f'seeds: none of the {len(candidates)} candidate(s) are funded on this fork')
-
-m = json.load(open(manifest_path))
-m['seeds'] = seeds
-json.dump(m, open(manifest_path, 'w'), indent=2)
-print(f'{len(seeds)}/{len(candidates)} candidate(s) funded; written to {manifest_path}')
-" "$candidates" "$m" "$run" "$magic" "$SCRIPTS/isolated-node"
+# Synthetic load is a Blaze/impersonation problem (building, signing and
+# tracking real transactions at a target rate), not a lifecycle one -- so
+# unlike every other subcommand here, this one is a thin exec into the SDK
+# rather than a bash implementation. See src/fork/generate.mjs.
+cmd_generate() {
+  local name=${1:?usage: devnet fork generate <n> --tps T --duration D [--shape transfer|fanout|mixed] [--amount-ada A]}
+  local run; run=$(resolve_run "$name")
+  require_manifest "$name" >/dev/null
+  fork_running "$run" || die "fork '$name' is not running:
+    devnet fork start $name"
+  exec node "$DEVNET_ROOT/src/fork/generate.mjs" "$@"
 }
 
 # ---------------------------------------------------------------- reset
@@ -1329,6 +1439,7 @@ case "$cmd" in
   warp)   cmd_warp "$@" ;;
   rate)   cmd_rate "$@" ;;
   seeds)  cmd_seeds "$@" ;;
+  generate) cmd_generate "$@" ;;
   reset)  cmd_reset "$@" ;;
   list)   cmd_list "$@" ;;
   follow) cmd_follow "$@" ;;
