@@ -11,6 +11,14 @@
 #   new-isolated-run <N>                       # gates unset (phase 1 style)
 #   new-isolated-run <N> <fork slot> <block every>   # gates set
 #
+# FOLLOWER=1 builds a run that FOLLOWS another node instead of forging alone:
+# one local root at 127.0.0.1:${FOLLOWER_OF_PORT:-3001}, peer targets of 1
+# instead of 0, and the Prometheus port moved off the forger's. It is meant to
+# be started with scripts/follower-node, which puts it inside the forger's own
+# network namespace -- so the pair can talk while the namespace still contains
+# nothing but lo. Give it the same fork gates as the forger (so it accepts the
+# forged blocks) but no BLOCK_EVERY, since it is not forging.
+#
 # FORK_NOW=<ISO8601 UTC, e.g. 2026-09-21T22:08:14Z> overrides "now" for the
 # opcert's KES period. Only needed when the run will start immediately under a
 # faked clock (scripts/set-faketime, e.g. a from-scratch reproducible restart
@@ -68,8 +76,9 @@ $CLI latest node issue-op-cert \
 
 # isolated config + topology
 python3 - "$RUN" <<'PY'
-import json, sys
+import json, os, sys
 run = sys.argv[1]
+follower = os.environ.get('FOLLOWER') == '1'
 c = json.load(open(f'{run}/chain/config.json'))
 c.update({
     "EnableP2P": True,
@@ -112,22 +121,55 @@ t["Forge.StateInfo"] = {"severity": "Silence"}
 # DeserialiseFailure instead, so the node trace is the only legible source.
 # DMaximum is what puts err.reason in the line.
 t["Mempool.RejectedTx"] = {"severity": "Info", "detail": "DMaximum"}
+topo = {"bootstrapPeers": None, "localRoots": [], "publicRoots": [],
+        "useLedgerAfterSlot": -1}
+
+if follower:
+    # A follower shares the FORGER'S network namespace (see scripts/
+    # follower-node), so "the other node" is reachable at 127.0.0.1 and the
+    # namespace still holds nothing but lo -- the isolation property is
+    # untouched. Everything below is the difference between a node that must
+    # not talk to anyone and one that must talk to exactly one peer.
+    port = int(os.environ.get('FOLLOWER_OF_PORT', '3001'))
+    topo["localRoots"] = [{
+        "accessPoints": [{"address": "127.0.0.1", "port": port}],
+        "advertise": False,
+        "trustable": True,
+        "hotValency": 1,
+        "warmValency": 1,
+    }]
+    # the isolated config zeroes every peer target; a follower needs exactly one
+    for k in ("TargetNumberOfRootPeers", "TargetNumberOfKnownPeers",
+              "TargetNumberOfEstablishedPeers", "TargetNumberOfActivePeers"):
+        c[k] = 1
+    # both nodes live in ONE network namespace, so the forger already owns
+    # 12798 -- a second bind there would fail
+    c["TraceOptions"][""]["backends"] = [
+        b.replace("12798", "12799") if "Prometheus" in b else b
+        for b in c["TraceOptions"][""]["backends"]]
+    # a follower adopting someone else's chain rolls back and switches forks as
+    # a matter of course; those are the events the sync check is about
+    for ns in ("ChainDB.AddBlockEvent.SwitchedToAFork",
+               "ChainDB.AddBlockEvent.AddedBlockToQueue"):
+        t.pop(ns, None)
+
 json.dump(c, open(f'{run}/chain/config.json', 'w'), indent=2)
 
 # bootstrapPeers must be null, not []: an empty list means "bootstrap mode with
 # zero trustable peers", which 11.1.2 rejects outright
-json.dump({"bootstrapPeers": None, "localRoots": [], "publicRoots": [],
-           "useLedgerAfterSlot": -1},
-          open(f'{run}/chain/topology.json', 'w'), indent=2)
+json.dump(topo, open(f'{run}/chain/topology.json', 'w'), indent=2)
 PY
 
-if [ $# -ge 3 ]; then
+# The validation gates and the forging cadence are separable: a follower needs
+# the first three (or it would reject the forger's blocks exactly the way a
+# stock node does) but must not have the fourth.
+if [ $# -ge 2 ]; then
   cat > "$RUN/chain/fork.env" <<EOF
 CARDANO_FORK_SLOT=$2
 CARDANO_FORK_GOD_KEY=$($CLI latest address key-hash --payment-verification-key-file "$GOLDEN/god/god.vkey")
 CARDANO_FORK_POOL_ID=$($CLI latest stake-pool id --cold-verification-key-file "$GOLDEN/pool/cold.vkey" --output-format hex)
-CARDANO_FORK_BLOCK_EVERY=$3
 EOF
+  [ $# -ge 3 ] && echo "CARDANO_FORK_BLOCK_EVERY=$3" >> "$RUN/chain/fork.env"
   echo "fork gates:"; sed 's/^/  /' "$RUN/chain/fork.env"
 else
   echo "fork gates: none (unset)"

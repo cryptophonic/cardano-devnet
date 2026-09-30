@@ -1,0 +1,112 @@
+#!/bin/bash
+
+# Start (or stop) a second node that FOLLOWS the isolated forger, for testing
+# that a peer adopts the forked chain -- crosses an epoch boundary in sync,
+# say -- rather than just the forger's own view of it.
+#
+# Usage:
+#   follower-node start <run dir>    # run dir from FOLLOWER=1 new-isolated-run
+#   follower-node stop
+#   follower-node logs [-f]
+#   follower-node cli <cardano-cli args...>   # cli against the FOLLOWER's socket
+#
+# Isolation is unchanged. The follower joins devnet-node-isolated's OWN network
+# namespace (--network container:...), the same way `isolated-node cli` does, so
+# it reaches the forger at 127.0.0.1:3001 while the namespace still contains
+# nothing but lo: no interface, no route, no published port, nothing for a real
+# preview node to reach or be reached by. Running the follower on a bridge
+# network instead would have given up exactly the property phase 8 established.
+#
+# The forger must already be running. Two consequences follow from that, and
+# both matter when the clock is accelerated (scripts/set-faketime --rate):
+#
+#   * libfaketime anchors a speed-up at PROCESS start, so a container that
+#     starts later is proportionally behind -- at x100, one real second of
+#     launch skew is 100 slots of clock skew. The follower starts second, so
+#     with equal targets its clock would sit BEHIND the forger's and every
+#     block it received would look like a block from the future.
+#   * Give the follower's faketime target a deliberate LEAD (a few hundred
+#     slots) so it lands ahead instead. A follower whose clock runs ahead of
+#     the chain is the ordinary case and costs nothing; one whose clock runs
+#     behind the chain rejects the chain.
+
+set -euo pipefail
+
+DEVNET_ROOT=${DEVNET_ROOT:-$(git -C "$(dirname "$0")" rev-parse --show-toplevel)}
+IMAGE=${DEVNET_IMAGE:-ghcr.io/cryptophonic/cardano-node-ogmios:v7.0.0_11.1.2-custom-cb30ce58-faketime}
+NAME=devnet-node-follower
+FORGER=devnet-node-isolated
+export MY_UID=${MY_UID:-$(id -u)}
+export MY_GID=${MY_GID:-$(id -g)}
+
+cmd=${1:-}; shift || true
+
+case "$cmd" in
+  start)
+    rundir=${1:?usage: follower-node start <run dir>}
+    rundir=$(realpath "$rundir")
+    golden=$(realpath "${GOLDEN_DB:-/mnt/cardano/preview}" 2>/dev/null || true)
+    if [ -n "$golden" ] && [ "$rundir" = "$golden" -o "$rundir/db" = "$golden" ]; then
+      echo "refusing: $rundir is the golden DB" >&2; exit 1
+    fi
+    for d in chain db ipc; do
+      [ -d "$rundir/$d" ] || { echo "missing $rundir/$d" >&2; exit 1; }
+    done
+    docker inspect -f '{{.State.Running}}' "$FORGER" 2>/dev/null | grep -q true || {
+      echo "refusing: $FORGER is not running; the follower joins its network namespace" >&2
+      exit 1
+    }
+    # env files, same convention as scripts/isolated-node
+    envargs=()
+    for f in fork.env faketime.env; do
+      if [ -f "$rundir/chain/$f" ]; then
+        envargs+=(--env-file "$rundir/chain/$f")
+        echo "$f:"; sed 's/^/  /' "$rundir/chain/$f"
+      fi
+    done
+    if [ -f "$rundir/chain/faketime.env" ]; then
+      dfm=$(sed -n 's/^FAKETIME_DONT_FAKE_MONOTONIC=//p' "$rundir/chain/faketime.env" | tail -1)
+      envargs+=(-e "FAKETIME_DONT_FAKE_MONOTONIC=${dfm:-1}")
+    fi
+    docker rm -f "$NAME" >/dev/null 2>&1 || true
+    docker run -d --name "$NAME" \
+      --platform linux/amd64 \
+      --network "container:$FORGER" \
+      --user "$MY_UID:$MY_GID" \
+      --stop-signal SIGINT \
+      "${envargs[@]}" \
+      -v "$rundir:/rundir" \
+      -v "$rundir/ipc:/ipc" \
+      --entrypoint /usr/local/bin/cardano-node \
+      "$IMAGE" \
+      run --config /rundir/chain/config.json \
+          --topology /rundir/chain/topology.json \
+          --database-path /rundir/db \
+          --socket-path /ipc/node.socket \
+          --host-addr 127.0.0.1 --port 3002 >/dev/null
+    echo "follower started; socket at $rundir/ipc/node.socket"
+    ;;
+  stop)
+    sock=$(docker inspect "$NAME" \
+             --format '{{range .Mounts}}{{if eq .Destination "/ipc"}}{{.Source}}{{end}}{{end}}' \
+             2>/dev/null)/node.socket
+    docker stop "$NAME"
+    [ -S "$sock" ] && rm -f "$sock" && echo "removed stale socket $sock"
+    ;;
+  logs)
+    docker logs "$@" "$NAME"
+    ;;
+  cli)
+    docker run --rm -i \
+      --network "container:$FORGER" \
+      --user "$MY_UID:$MY_GID" \
+      --volumes-from "$NAME" \
+      -e CARDANO_NODE_SOCKET_PATH=/ipc/node.socket \
+      --entrypoint /usr/local/bin/cardano-cli \
+      "$IMAGE" "$@"
+    ;;
+  *)
+    sed -n '3,33p' "$0"
+    exit 1
+    ;;
+esac
