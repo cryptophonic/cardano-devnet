@@ -106,22 +106,39 @@ With the node forging, the stamp was rewritten in place from
 advanced by 2000 s. No restart, no SIGHUP, nothing sent to the container at all;
 the file simply changed under it.
 
-The clock moved. The single 100-slot cadence gap above is that moment. Measured
-~25 real seconds later the tip had advanced 320 slots where an unchanged clock
-predicts 2500, which at first reading looks like a collapse — it is not, it is a
-stale-log artifact of comparing a `Chain extended` line's slot against a fresher
-clock sample.
+The clock moved: the single 100-slot cadence gap above is that moment, and the
+node kept forging afterwards at the 20-slot cadence with zero horizon errors.
+That much is solid, and it is the claim this section supports.
 
-Sampling clock and tip from the **same** log line settles it:
+### Correction — what this section does NOT show
+
+An earlier version of this fixture reported "the node absorbed the forward jump
+and returned to zero lag", from these samples:
 
     clock_slot=123385040  tip=123385040  gap=0
     (40 s real later)
     clock_slot=123389040  tip=123389040  gap=0
 
-4000 slots in 40 real seconds, and the tip exactly on its own clock. The node
-absorbed the forward jump and returned to zero lag.
+**That measurement is circular and proves nothing about lag.** Both numbers were
+taken from the same `Chain extended` line, and for a *forger* that line's
+timestamp is the moment it forged that slot — so clock and tip agree by
+construction, whatever the real lag. A forger cannot be used to measure its own
+clock lag this way. 10e measures it properly, by comparing two different nodes.
 
-**PASS.** The clock is a signal, not an immutable property of the process.
+It was probably not a forward jump either. 10e establishes that a rewrite
+re-anchors the speed-up at the moment of the read, so the clock became
+`new_anchor + ~0` rather than `old_clock + 2000`. The old clock had already run
+`100 x elapsed` past its anchor, so moving the anchor forward by 2000 s landed
+the clock **behind** where it had got to — a backwards jump of roughly 8000
+slots. The brief cadence disruption is consistent with the node waiting for its
+clock to catch back up to its own tip.
+
+So: rewriting the file demonstrably moves a running node's clock, and the node
+survives it. The direction and magnitude in this arm were not what they were
+first reported to be, and forward-jump absorption remains untested.
+
+**PASS** on the narrow claim: the clock is a signal, not an immutable property
+of the process.
 
 ## 10e. Two nodes synchronised by writing both stamps after startup
 
