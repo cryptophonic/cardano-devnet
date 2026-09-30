@@ -18,7 +18,8 @@
 # the container's clock is shifted via LD_PRELOAD'd libfaketime so "now" lands
 # just past a stale DB's tip, inside the ledger's forecast horizon -- lets a
 # forging run resume without waiting on a real DB re-sync. No such file =>
-# real clock, unchanged from before.
+# real clock, unchanged from before. That file may also carry a rate multiplier
+# and FAKETIME_DONT_FAKE_MONOTONIC (see scripts/set-faketime --rate).
 
 set -euo pipefail
 
@@ -57,6 +58,12 @@ case "$cmd" in
       export ISOLATED_FAKETIME_ENV_FILE=$rundir/chain/faketime.env
       echo "faketime env: $ISOLATED_FAKETIME_ENV_FILE"
       sed 's/^/  /' "$ISOLATED_FAKETIME_ENV_FILE"
+      # compose's `environment:` beats `env_file:`, so this one key cannot be
+      # delivered by the env file -- lift it out and hand it to compose as a
+      # shell variable instead. The file stays the record of what the run used.
+      export ISOLATED_DONT_FAKE_MONOTONIC=$(
+        sed -n 's/^FAKETIME_DONT_FAKE_MONOTONIC=//p' "$ISOLATED_FAKETIME_ENV_FILE" | tail -1)
+      export ISOLATED_DONT_FAKE_MONOTONIC=${ISOLATED_DONT_FAKE_MONOTONIC:-1}
     else
       echo "faketime env: none (real clock)"
     fi

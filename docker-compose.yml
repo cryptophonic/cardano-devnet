@@ -95,12 +95,15 @@ services:
     # present) -- deliberately not set here too, since compose's
     # `environment:` overrides `env_file:` for the same key and an empty
     # default here would silently blank out whatever faketime.env set.
-    # FAKETIME_DONT_FAKE_MONOTONIC=1 is safe to set unconditionally: it's a
-    # no-op unless libfaketime is actually loaded, and whenever it is we
-    # always want it -- CLOCK_MONOTONIC drives consensus timers and must not
-    # jump.
+    # FAKETIME_DONT_FAKE_MONOTONIC has to live here rather than in
+    # faketime.env, because compose's `environment:` overrides `env_file:` and
+    # a value set only in the file would be shadowed by this one. It is a no-op
+    # unless libfaketime is actually loaded. scripts/isolated-node exports
+    # ISOLATED_DONT_FAKE_MONOTONIC from the run's faketime.env so the run dir
+    # stays the single record of the clock settings; the default is 1
+    # (CLOCK_MONOTONIC left alone), which is what an unaccelerated shift wants.
     environment:
-      - FAKETIME_DONT_FAKE_MONOTONIC=1
+      - FAKETIME_DONT_FAKE_MONOTONIC=${ISOLATED_DONT_FAKE_MONOTONIC:-1}
     # the image healthcheck probes ogmios, which is not running here
     healthcheck:
       test: ["CMD-SHELL", "test -S /ipc/node.socket"]

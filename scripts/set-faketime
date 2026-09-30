@@ -15,6 +15,18 @@
 #   set-faketime <run dir> --slot <N>   # derive from an explicit slot instead
 #   set-faketime <run dir> --clear      # remove faketime.env (back to real clock)
 #
+# Options (combine with either form above):
+#   --rate <X>          run the container's clock X times real speed, so a chain
+#                       hour costs a real minute at X=60. libfaketime anchors the
+#                       speed-up at process start, so the node sees
+#                       target + X*(real seconds since it started).
+#   --fake-monotonic    also accelerate CLOCK_MONOTONIC (default: leave it real).
+#                       CLOCK_MONOTONIC is what consensus and the mux build their
+#                       timers on, so this is the knob that decides whether the
+#                       node's *timers* speed up with its wall clock or stay at
+#                       real pace while wall time runs away from them. Which one
+#                       a given rate wants is an empirical question -- measure it.
+#
 # Slot and wall-clock are exactly 1:1 on preview (slotLength=1s):
 #   time = systemStart + slot seconds, systemStart from shelley-genesis.json.
 # Don't reconstruct this from era history elsewhere; it's already this simple.
@@ -33,20 +45,26 @@ set -euo pipefail
 
 LEAD=${LEAD_SECONDS:-10}
 
-rundir=${1:?usage: set-faketime <run dir> [--slot <N> | --clear]}
+rundir=${1:?usage: set-faketime <run dir> [--slot <N> | --clear] [--rate X] [--fake-monotonic]}
+shift
 rundir=$(realpath "$rundir")
 [ -d "$rundir/chain" ] || { echo "missing $rundir/chain" >&2; exit 1; }
 out=$rundir/chain/faketime.env
 
-if [ "${2:-}" = "--clear" ]; then
-  rm -f "$out"
-  echo "removed $out (real clock)"
-  exit 0
-fi
+slot=
+rate=
+dont_fake_monotonic=1
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --clear) rm -f "$out"; echo "removed $out (real clock)"; exit 0 ;;
+    --slot)  slot=${2:?--slot needs a slot number}; shift 2 ;;
+    --rate)  rate=${2:?--rate needs a multiplier}; shift 2 ;;
+    --fake-monotonic) dont_fake_monotonic=0; shift ;;
+    *) echo "unknown argument: $1" >&2; exit 1 ;;
+  esac
+done
 
-if [ "${2:-}" = "--slot" ]; then
-  slot=${3:?usage: set-faketime <run dir> --slot <N>}
-else
+if [ -z "$slot" ]; then
   slot=$(docker logs devnet-node-isolated 2>&1 | sed 's/\x1b\[[0-9;]*m//g' \
          | grep -a 'Chain extended' | tail -1 | grep -oE 'at slot [0-9]+' | grep -oE '[0-9]+')
   [ -n "$slot" ] || {
@@ -63,10 +81,15 @@ t = s + datetime.timedelta(seconds=$slot + $LEAD)
 print(f'@{t:%Y-%m-%d %H:%M:%S}')
 ")
 
+# libfaketime spells a speed-up as a trailing " x<rate>" on the FAKETIME string
+[ -n "$rate" ] && faketime="$faketime x$rate"
+
 cat > "$out" <<EOF
 LD_PRELOAD=/opt/faketime/libfaketime.so.1
 FAKETIME=$faketime
+FAKETIME_DONT_FAKE_MONOTONIC=$dont_fake_monotonic
 EOF
 echo "wrote $out:"
 sed 's/^/  /' "$out"
-echo "(from slot $slot + ${LEAD}s lead)"
+echo "(from slot $slot + ${LEAD}s lead${rate:+, rate x$rate}\
+$([ "$dont_fake_monotonic" = 0 ] && echo ', CLOCK_MONOTONIC faked too'))"
