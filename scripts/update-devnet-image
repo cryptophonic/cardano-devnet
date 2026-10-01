@@ -1,0 +1,93 @@
+#!/bin/bash
+
+# update-devnet-image — pull a new cardano-node/cli/ogmios devnet image and
+# update the default tag everywhere it is hard-coded in this repo.
+#
+# Usage:
+#   update-devnet-image              # list available tags on ghcr, pull & switch to the newest
+#   update-devnet-image <tag>        # pull & switch to a specific tag
+#   update-devnet-image --list       # just list available tags, change nothing
+#
+# The image repo is ghcr.io/cryptophonic/cardano-node-ogmios (override with
+# DEVNET_IMAGE_REPO). The image itself is built and published from the separate
+# fork-mode repo — this script only consumes published tags.
+#
+# Files updated (the ${DEVNET_IMAGE:-...} default):
+#   docker-compose.yml
+#   scripts/isolated-node
+#   scripts/follower-node
+#   scripts/devnet-fork
+
+set -euo pipefail
+
+REPO=${DEVNET_IMAGE_REPO:-ghcr.io/cryptophonic/cardano-node-ogmios}
+ROOT=${DEVNET_ROOT:-$(cd "$(dirname "$0")/.." && pwd)}
+
+FILES=(
+  "$ROOT/docker-compose.yml"
+  "$ROOT/scripts/isolated-node"
+  "$ROOT/scripts/follower-node"
+  "$ROOT/scripts/devnet-fork"
+)
+
+list_tags() {
+  # The package is private, so we need a GitHub token to list tags
+  # (GITHUB_TOKEN, or whatever `gh auth token` returns).
+  local name=${REPO#ghcr.io/}
+  local gh_token=${GITHUB_TOKEN:-$(gh auth token 2>/dev/null || true)}
+  if [[ -z "$gh_token" ]]; then
+    echo "Need GITHUB_TOKEN (or 'gh auth login') to list tags on $REPO" >&2
+    exit 1
+  fi
+  local token
+  token=$(curl -fsSL -u "token:${gh_token}" "https://ghcr.io/token?scope=repository:${name}:pull" \
+    | sed -n 's/.*"token":"\([^"]*\)".*/\1/p')
+  curl -fsSL -H "Authorization: Bearer $token" "https://ghcr.io/v2/${name}/tags/list" \
+    | tr ',[]' '\n' | sed -n 's/.*"\([^"]*\)".*/\1/p' \
+    | grep -v -e "^${name}$" -e '^tags$' -e '^latest$' | sort
+}
+
+current_tag() {
+  grep -o "${REPO}:[A-Za-z0-9._-]*" "$ROOT/docker-compose.yml" | head -1 | sed 's/.*://'
+}
+
+if [[ "${1:-}" == --list ]]; then
+  list_tags
+  exit 0
+fi
+
+if [[ -n "${1:-}" ]]; then
+  TAG=$1
+else
+  echo "Fetching tags from $REPO ..."
+  TAGS=$(list_tags)
+  echo "$TAGS" | sed 's/^/  /'
+  TAG=$(echo "$TAGS" | tail -1)
+  echo "Selected newest tag: $TAG"
+fi
+
+OLD=$(current_tag)
+if [[ -z "$OLD" ]]; then
+  echo "Could not determine current tag from docker-compose.yml; aborting." >&2
+  exit 1
+fi
+echo "Current default tag: $OLD"
+echo "Pulling ${REPO}:${TAG} ..."
+docker pull "${REPO}:${TAG}"
+
+if [[ "$TAG" == "$OLD" ]]; then
+  echo "Default tag already ${TAG}; nothing to rewrite."
+  exit 0
+fi
+
+for f in "${FILES[@]}"; do
+  if grep -q "${REPO}:${OLD}" "$f"; then
+    sed -i.bak "s|${REPO}:${OLD}|${REPO}:${TAG}|g" "$f" && rm -f "$f.bak"
+    echo "Updated $f"
+  else
+    echo "Warning: no ${REPO}:${OLD} reference in $f" >&2
+  fi
+done
+
+echo "Done. Default image is now ${REPO}:${TAG}."
+echo "Restart running services (e.g. start-cardano-devnet) to pick it up."
