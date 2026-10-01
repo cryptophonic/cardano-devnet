@@ -23,10 +23,10 @@ host paths the container can't see, and may be a different node version than
 the devnet is running. Always go through the wrapper.
 
 The node/cli/ogmios image is `ghcr.io/cryptophonic/cardano-node-ogmios`;
-override it with `DEVNET_IMAGE`. Locally-built artifacts that are baked into
-the published image (`bin/`, `docker/libfaketime.so.1`) are deliberately
-gitignored — rebuild them with `scripts/build-faketime` and the Dockerfile
-rather than committing them.
+override it with `DEVNET_IMAGE`. This repo only consumes the published image —
+building and pushing it (Dockerfile, build-faketime, publish) lives in the
+separate `fork-mode` repo, which is also the parent of the patched
+cardano-node source.
 
 ## Fork mode (`fork-mode` branch)
 
@@ -63,7 +63,8 @@ Conventions that matter:
 - `src/` — node-side JS: monitor, indexer, fund, Blaze/Lucid provider, fork SDK.
 - `explorer/` — SvelteKit web explorer (its own `npm install`).
 - `config/` — genesis, credentials and node config for the local devnet.
-- `docker/`, `docker-compose.yml` — image build and service definitions.
+- `docker-compose.yml` — service definitions (the image itself is built and
+  published from the separate `fork-mode` repo).
 - `hydra/` — optional local hydra head, see its own README.
 - `cardano-cli-guru/` — submodule providing the address-alias tooling.
 
