@@ -23,6 +23,7 @@
   </div>
   <div class="flex justify-between">
     <a class="btn color-block shadow-xl" href="/chain/0">Genesis Block</a>
+    <a class="btn color-address shadow-xl" href="/fork">Forks</a>
     <a class="btn color-block shadow-xl" href="/chain/{latest}">Latest Block {latest}</a>
   </div>
   <div class="mt-4 mb-4">

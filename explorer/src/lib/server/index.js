@@ -60,6 +60,12 @@ export function loadBlock(path) {
 }
 
 export function loadLatest() {
+  // Local devnet mode may never have run on this host at all -- a fork-only
+  // session has no reason to have started it -- and this load() runs for
+  // every route via +layout.server.js, including the fork-mode pages below,
+  // which don't touch the indexer. Degrade to an empty devnet rather than
+  // taking the whole app down for routes that don't need this.
+  if (!fs.existsSync(DB + "/latest")) return { height: 0, tokens: {} }
   const latest = JSON.parse(fs.readFileSync(DB + "/latest"))
   const tokens = JSON.parse(fs.readFileSync(DB + "/tokens/ledger"))
   //console.log("Loading latest: " + latest.height)
@@ -319,42 +325,6 @@ export function renameAlias(addr, from, to) {
     fs.renameSync(GURU_ASSETS + "/keys/" + from + ".vkey", GURU_ASSETS + "/keys/" + to + ".vkey")
     fs.writeFileSync(GURU_ASSETS + "/alias/" + addr + ".alias", to)
   } catch (err) {}
-}
-
-export function loadBlocksPage(page) {
-  const pg = JSON.parse(fs.readFileSync(DB + "/pages/blocks/" + page))
-  const last = JSON.parse(fs.readFileSync(DB + "/pages/blocks/last"))
-  const newObj = {
-    pageIndex: parseInt(page),
-    lastPage: parseInt(last),
-    pageData: pg.map(p => {
-      return {
-        height: p.height,
-        id: small_hash(p.id),
-        txCount: p.txCount
-      }
-    })
-  }
-  return newObj
-}
-
-export function loadTransactionsPage(page) {
-  const pg = JSON.parse(fs.readFileSync(DB + "/pages/transactions/" + page))
-  const last = JSON.parse(fs.readFileSync(DB + "/pages/transactions/last"))
-  const newObj = {
-    pageIndex: parseInt(page),
-    lastPage: parseInt(last),
-    pageData: pg.list.map(p => {
-      return {
-        index: pg.ids[p].index,
-        id: [p, small_hash(p)],
-        unspentCount: pg.ids[p].unspentCount,
-        spentCount: pg.ids[p].spent.length - pg.ids[p].unspentCount,
-        utxos: pg.ids[p].spent
-      }
-    })
-  }
-  return newObj
 }
 
 export function loadBlocksPage(page) {
