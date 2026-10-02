@@ -7,9 +7,16 @@
 #   - KES/VRF keys plus a freshly issued opcert at the CURRENT KES period
 #   - optionally a fork.env with the fork gates
 #
+# The fork identity -- pool (cold/KES/VRF) keys and the god key -- is not part
+# of the golden chain and never lives in the golden dir. It is shared by every
+# run, in <RUNS>/keys, and generated there on first use.
+#
 # Usage:
-#   new-isolated-run <N>                       # gates unset (phase 1 style)
-#   new-isolated-run <N> <fork slot> <block every>   # gates set
+#   new-isolated-run [--start] <N>                       # gates unset (phase 1 style)
+#   new-isolated-run [--start] <N> <fork slot> <block every>   # gates set
+#
+# This only builds the run dir. Start the node with isolated-node start <N>, or
+# pass --start to do both.
 #
 # FOLLOWER=1 builds a run that FOLLOWS another node instead of forging alone:
 # one local root at 127.0.0.1:${FOLLOWER_OF_PORT:-3001}, peer targets of 1
@@ -27,17 +34,51 @@
 # once that node's clock is faked backward. Ordinary runs that start under the
 # real clock don't need this.
 #
-# Then: isolated-node start <RUNS>/run-<N>
+# Then: isolated-node start <N>
 
 set -euo pipefail
 
 GOLDEN=${GOLDEN_DB:-/mnt/cardano/preview}
 RUNS=${RUNS_DIR:-/mnt/cardano/runs}
-CLI=${CARDANO_CLI_BIN:-/mnt/cardano/bin/node-11.1.2/bin/cardano-cli}
+KEYS=$RUNS/keys
+CLI=${CARDANO_CLI_BIN:-/mnt/cardano/bin/cardano-cli}
 
-N=${1:?usage: new-isolated-run <N> [fork-slot block-every]}
+START=
+args=()
+for a in "$@"; do
+  [ "$a" = --start ] && START=1 || args+=("$a")
+done
+set -- "${args[@]+"${args[@]}"}"
+
+N=${1:?usage: new-isolated-run [--start] <N> [fork-slot block-every]}
 RUN=$RUNS/run-$N
 [ -e "$RUN" ] && { echo "refusing: $RUN already exists (run dirs are never reused)" >&2; exit 1; }
+
+# first use: generate the fork identity
+mkdir -p "$KEYS"
+if [ ! -e "$KEYS/cold.vkey" ]; then
+  echo "generating fork pool keys in $KEYS"
+  $CLI latest node key-gen \
+    --cold-verification-key-file "$KEYS/cold.vkey" \
+    --cold-signing-key-file "$KEYS/cold.skey" \
+    --operational-certificate-issue-counter-file "$KEYS/opcert.counter"
+  $CLI latest node key-gen-KES \
+    --verification-key-file "$KEYS/kes.vkey" \
+    --signing-key-file "$KEYS/kes.skey"
+  $CLI latest node key-gen-VRF \
+    --verification-key-file "$KEYS/vrf.vkey" \
+    --signing-key-file "$KEYS/vrf.skey"
+fi
+if [ ! -e "$KEYS/god.vkey" ]; then
+  echo "generating god key in $KEYS"
+  $CLI latest address key-gen \
+    --verification-key-file "$KEYS/god.vkey" \
+    --signing-key-file "$KEYS/god.skey"
+fi
+chmod 600 "$KEYS"/*.skey
+
+# a half-built run dir would block the name forever, so remove it on failure
+trap '[ $? -eq 0 ] || { echo "failed; removing $RUN" >&2; rm -rf "$RUN"; }' EXIT
 
 mkdir -p "$RUN/chain" "$RUN/ipc"
 
@@ -45,7 +86,7 @@ mkdir -p "$RUN/chain" "$RUN/ipc"
 cp -a --reflink=always "$GOLDEN/db" "$RUN/db"
 
 cp -a "$GOLDEN"/config/*.json "$RUN/chain/"
-cp -a "$GOLDEN"/pool/kes.skey "$GOLDEN"/pool/vrf.skey "$RUN/chain/"
+cp -a "$KEYS"/kes.skey "$KEYS"/vrf.skey "$RUN/chain/"
 
 # Each run starts from the same golden ledger state, where the pool's opcert
 # counter is 0. The OCERT rule only accepts a cert whose issue number is within
@@ -53,7 +94,7 @@ cp -a "$GOLDEN"/pool/kes.skey "$GOLDEN"/pool/vrf.skey "$RUN/chain/"
 # rather than the golden one, which would creep up and cause
 # CounterOverIncrementedOCERT once it passed 1.
 $CLI latest node new-counter \
-  --cold-verification-key-file "$GOLDEN/pool/cold.vkey" \
+  --cold-verification-key-file "$KEYS/cold.vkey" \
   --counter-value 0 \
   --operational-certificate-issue-counter-file "$RUN/chain/opcert.counter"
 
@@ -68,8 +109,8 @@ now = (datetime.datetime.strptime(override, '%Y-%m-%dT%H:%M:%SZ').replace(tzinfo
        if override else datetime.datetime.now(datetime.timezone.utc))
 print(int((now - s).total_seconds()) // g['slotsPerKESPeriod'])")
 $CLI latest node issue-op-cert \
-  --kes-verification-key-file "$GOLDEN/pool/kes.vkey" \
-  --cold-signing-key-file "$GOLDEN/pool/cold.skey" \
+  --kes-verification-key-file "$KEYS/kes.vkey" \
+  --cold-signing-key-file "$KEYS/cold.skey" \
   --operational-certificate-issue-counter "$RUN/chain/opcert.counter" \
   --kes-period "$KES" \
   --out-file "$RUN/chain/node.opcert"
@@ -166,8 +207,8 @@ PY
 if [ $# -ge 2 ]; then
   cat > "$RUN/chain/fork.env" <<EOF
 CARDANO_FORK_SLOT=$2
-CARDANO_FORK_GOD_KEY=$($CLI latest address key-hash --payment-verification-key-file "$GOLDEN/god/god.vkey")
-CARDANO_FORK_POOL_ID=$($CLI latest stake-pool id --cold-verification-key-file "$GOLDEN/pool/cold.vkey" --output-format hex)
+CARDANO_FORK_GOD_KEY=$($CLI latest address key-hash --payment-verification-key-file "$KEYS/god.vkey")
+CARDANO_FORK_POOL_ID=$($CLI latest stake-pool id --cold-verification-key-file "$KEYS/cold.vkey" --output-format hex)
 EOF
   [ $# -ge 3 ] && echo "CARDANO_FORK_BLOCK_EVERY=$3" >> "$RUN/chain/fork.env"
   echo "fork gates:"; sed 's/^/  /' "$RUN/chain/fork.env"
@@ -176,4 +217,9 @@ else
 fi
 
 echo "opcert issued at KES period $KES"
+if [ -n "$START" ]; then
+  echo "run dir ready: $RUN; starting"
+  exec "$(dirname "$0")/isolated-node" start "$RUN"
+fi
 echo "run dir ready: $RUN"
+echo "node NOT started; run: isolated-node start $N"

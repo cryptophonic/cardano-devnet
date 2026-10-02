@@ -64,11 +64,11 @@ export class Fork {
     if (!url) throw new Error(`could not determine the ogmios address for fork '${name}'`)
 
     const godKeyPath = opts.godKeyPath ?? manifest.godKeyPath ??
-      `${process.env.GOLDEN_DB ?? '/mnt/cardano/preview'}/god/god.skey`
+      `${process.env.RUNS_DIR ?? '/mnt/cardano/runs'}/keys/god.skey`
     if (!fs.existsSync(godKeyPath)) {
       throw new Error(
         `no god signing key at ${godKeyPath}. It is not kept in the run ` +
-        `directory; point openFork at it with { godKeyPath }, or set GOLDEN_DB.`
+        `directory; point openFork at it with { godKeyPath }, or set RUNS_DIR.`
       )
     }
 

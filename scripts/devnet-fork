@@ -59,7 +59,10 @@ set -euo pipefail
 DEVNET_ROOT=${DEVNET_ROOT:-$(git -C "$(dirname "$0")" rev-parse --show-toplevel)}
 SCRIPTS=$DEVNET_ROOT/scripts
 RUNS=${RUNS_DIR:-/mnt/cardano/runs}
-CLI=${CARDANO_CLI_BIN:-/mnt/cardano/bin/node-11.1.2/bin/cardano-cli}
+# the fork identity (pool + god keys), shared by every run; new-isolated-run
+# generates it on first use
+KEYS=$RUNS/keys
+CLI=${CARDANO_CLI_BIN:-/mnt/cardano/bin/cardano-cli}
 TOOLBIN=$(dirname "$CLI")
 IMAGE=${DEVNET_IMAGE:-ghcr.io/cryptophonic/cardano-node-ogmios:v7.0.0_11.1.2-custom-cb30ce58-faketime}
 # run dir -> container name, the same mapping scripts/isolated-node uses
@@ -361,14 +364,11 @@ cmd_create() {
       ;;
     *) die "create: --from must be db:<path> or mithril" ;;
   esac
-  [ -d "$source/db" ] || die "$source/db not found (a source dir holds db/, config/, pool/, god/)"
+  [ -d "$source/db" ] || die "$source/db not found (a source dir holds db/ and config/)"
   [ -d "$source/config" ] || die "$source/config not found"
   [ -f "$source/mithril/download.log" ] && \
     mithril_digest=$(grep -oE "snapshot '[0-9a-f]{64}'" "$source/mithril/download.log" \
                      | head -1 | grep -oE '[0-9a-f]{64}' || true)
-
-  # --- identity: reuse the source's god key and pool, generate if absent
-  ensure_identity "$source"
 
   # --- fork slot: default to the source's own chain tip, volatile blocks
   # included. Not the ImmutableDB tip: the last ~k blocks of a synced chain
@@ -429,41 +429,6 @@ print(f'{slot_to_time($slot + 10):%Y-%m-%dT%H:%M:%SZ}')" "$source/config/shelley
   echo "  start it: devnet fork start $name"
 }
 
-# A fork's identity lives in the source dir, the same contract
-# /mnt/cardano/preview already follows: god/{god.skey,god.vkey} and
-# pool/{cold,kes,vrf}.*. Generate only what is missing.
-ensure_identity() {
-  local source=$1
-  if [ ! -f "$source/god/god.vkey" ]; then
-    echo "generating god key in $source/god (source dir had none)"
-    mkdir -p "$source/god"
-    $CLI latest address key-gen \
-      --verification-key-file "$source/god/god.vkey" \
-      --signing-key-file "$source/god/god.skey"
-  fi
-  mkdir -p "$source/pool"
-  if [ ! -f "$source/pool/cold.vkey" ]; then
-    echo "generating fork pool cold key in $source/pool"
-    $CLI latest node key-gen \
-      --cold-verification-key-file "$source/pool/cold.vkey" \
-      --cold-signing-key-file "$source/pool/cold.skey" \
-      --operational-certificate-issue-counter-file "$source/pool/opcert.counter"
-  fi
-  if [ ! -f "$source/pool/kes.vkey" ]; then
-    echo "generating fork pool KES key in $source/pool"
-    $CLI latest node key-gen-KES \
-      --verification-key-file "$source/pool/kes.vkey" \
-      --signing-key-file "$source/pool/kes.skey"
-  fi
-  if [ ! -f "$source/pool/vrf.vkey" ]; then
-    echo "generating fork pool VRF key in $source/pool"
-    $CLI latest node key-gen-VRF \
-      --verification-key-file "$source/pool/vrf.vkey" \
-      --signing-key-file "$source/pool/vrf.skey"
-    chmod 600 "$source/pool/vrf.skey"
-  fi
-}
-
 # A ledger snapshot taken after the fork slot is state the truncated chain no
 # longer leads to; leaving it would let the node resume past its own tip.
 drop_late_snapshots() {
@@ -518,7 +483,7 @@ write_manifest() {
   local run=$1 name=$2 network=$3 source=$4 slot=$5 hash=$6 rate=$7 be=$8 mithril=$9
   local addr kes
   addr=$($CLI latest address build \
-           --payment-verification-key-file "$source/god/god.vkey" \
+           --payment-verification-key-file "$KEYS/god.vkey" \
            --testnet-magic "$(network_magic "$network")" 2>/dev/null || true)
   # the opcert was issued at the KES period of the faked clock, which
   # new-isolated-run was pointed at via FORK_NOW = fork slot + the 10s lead
@@ -530,7 +495,7 @@ print(kes_of($slot + 10))" "$run/chain/shelley-genesis.json")
   M_GOD=$(sed -n 's/^CARDANO_FORK_GOD_KEY=//p' "$run/chain/fork.env") \
   M_POOL=$(sed -n 's/^CARDANO_FORK_POOL_ID=//p' "$run/chain/fork.env") \
   M_ADDR=$addr M_KES=$kes M_RATE=$rate M_BE=$be M_IMAGE=$IMAGE \
-  M_GODKEY=$source/god/god.skey \
+  M_GODKEY=$KEYS/god.skey \
   M_DIGEST=$(docker image inspect "$IMAGE" --format '{{index .RepoDigests 0}}' 2>/dev/null | sed 's/.*@//' || true) \
   M_MITHRIL=$mithril \
   write_manifest_env "$run"
@@ -587,10 +552,10 @@ cmd_adopt() {
   local kes; kes=$(python3 -c "$(genesis_py)
 print(kes_of($slot))" "$run/chain/shelley-genesis.json")
 
-  # the god address is derivable only if the source dir that made this run is
-  # still around; it is not required to follow, so an absence is not an error
+  # the god address is derivable only if the shared fork identity is still
+  # around; it is not required to follow, so an absence is not an error
   local addr=""
-  local gv=${GOLDEN_DB:-/mnt/cardano/preview}/god/god.vkey
+  local gv=$KEYS/god.vkey
   [ -f "$gv" ] && addr=$($CLI latest address build --payment-verification-key-file "$gv" \
                            --testnet-magic "$(network_magic "$network")" 2>/dev/null || true)
 
