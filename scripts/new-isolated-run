@@ -51,6 +51,8 @@ done
 set -- "${args[@]+"${args[@]}"}"
 
 N=${1:?usage: new-isolated-run [--start] <N> [fork-slot block-every]}
+# run-<N> names the same run, as it does for isolated-node and devnet-fork
+N=${N#run-}
 RUN=$RUNS/run-$N
 [ -e "$RUN" ] && { echo "refusing: $RUN already exists (run dirs are never reused)" >&2; exit 1; }
 
