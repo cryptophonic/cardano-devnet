@@ -6,15 +6,20 @@
 # way in or out.
 #
 # Usage:
-#   isolated-node start <run dir>    # run dir must contain chain/ db/ ipc/
-#   isolated-node stop [<run dir>]
-#   isolated-node logs [<run dir>] [-f]
-#   isolated-node cli [--run <run dir>] <cardano-cli args...>
+#   isolated-node start <run>        # run dir must contain chain/ db/ ipc/
+#   isolated-node stop [<run>]
+#   isolated-node logs [<run>] [-f]
+#   isolated-node cli [--run <run>] <cardano-cli args...>
+#   isolated-node status [<run>]     # fork containers and their runs
+#   isolated-node rm <run>           # delete a run dir and its stopped containers
+#
+# <run> is a run name as given to new-isolated-run (mark-test, or run-mark-test,
+# means $RUNS_DIR/run-mark-test), or a path to a run dir if it contains a slash.
 #
 # Several forks can run at once. Each run directory gets its own container,
-# named devnet-fork-<run suffix>, in its own compose project. Subcommands other
-# than start take a run directory; if exactly one fork is running they default
-# to it, and otherwise they list what is running and stop.
+# named devnet-fork-<run suffix>, in its own compose project. stop, logs and cli
+# take an optional <run>; if exactly one fork is running they default to it,
+# and otherwise they list what is running and stop.
 #
 # The run directory is a copy of the golden DB plus an isolated config; never
 # point this at the golden DB itself.
@@ -31,6 +36,17 @@ set -euo pipefail
 DEVNET_ROOT=${DEVNET_ROOT:-$(git -C "$(dirname "$0")" rev-parse --show-toplevel)}
 export MY_UID=${MY_UID:-$(id -u)}
 export MY_GID=${MY_GID:-$(id -g)}
+
+RUNS=${RUNS_DIR:-/mnt/cardano/runs}
+
+# <run> -> existing run dir, accepting what devnet-fork's resolve_run does
+run_dir() {
+  case $1 in
+    */*)   realpath -e "$1" ;;
+    run-*) realpath -e "$RUNS/$1" ;;
+    *)     realpath -e "$RUNS/run-$1" ;;
+  esac
+}
 
 # run dir -> container name. One mapping, used by every script that needs it.
 container_for() { local b; b=$(basename "${1%/}"); echo "devnet-fork-${b#run-}"; }
@@ -60,8 +76,7 @@ cmd=${1:-}; shift || true
 
 case "$cmd" in
   start)
-    rundir=${1:?usage: isolated-node start <run dir>}
-    rundir=$(realpath "$rundir")
+    rundir=$(run_dir "${1:?usage: isolated-node start <run>}")
     # never run against the golden DB: it is the one copy of the synced chain
     golden=$(realpath "${GOLDEN_DB:-/mnt/cardano/preview}" 2>/dev/null || true)
     if [ -n "$golden" ] && [ "$rundir" = "$golden" -o "$rundir/db" = "$golden" ]; then
@@ -141,8 +156,66 @@ case "$cmd" in
       "${DEVNET_IMAGE:-ghcr.io/cryptophonic/cardano-node-ogmios:v7.0.0_11.1.2-custom-cb30ce58-faketime}" \
       "$@"
     ;;
+  status)
+    # every fork container (producer, follower, ogmios), found by label; with a
+    # <run>, only that run's, plus its socket and gates
+    rundir=""
+    filter=(--filter label=devnet.fork)
+    if [ -n "${1:-}" ]; then
+      rundir=$(run_dir "$1")
+      filter=(--filter "label=devnet.fork.run=$rundir")
+    fi
+    rows=$(docker ps -a "${filter[@]}" --format \
+      '{{.Label "devnet.fork.run"}}|{{.Label "devnet.fork"}}|{{.Names}}|{{.State}}|{{.Status}}')
+    if [ -z "$rows" ]; then
+      echo "no fork containers${rundir:+ for $rundir}"
+    else
+      runs=$(realpath -m "$RUNS")
+      while IFS='|' read -r run role name state status; do
+        [ "$(dirname "$run")" = "$runs" ] && run=${run##*/run-}
+        printf '%s|%s|%s|%s\n' "$run" "$role" "$name" "$status"
+      done <<<"$rows" | sort | column -t -s'|' -N RUN,ROLE,CONTAINER,STATUS
+    fi
+    if [ -n "$rundir" ]; then
+      if [ -S "$rundir/ipc/node.socket" ]; then
+        grep -q '|producer|[^|]*|running|' <<<"$rows" && stale= || stale=" (stale: node is not running)"
+        echo "socket: $rundir/ipc/node.socket$stale"
+      fi
+      if [ -f "$rundir/chain/fork.env" ]; then
+        echo "fork:   $(paste -sd' ' "$rundir/chain/fork.env")"
+      else
+        echo "fork:   none (gates unset)"
+      fi
+    fi
+    # success iff some producer is running
+    grep -q '|producer|[^|]*|running|' <<<"$rows"
+    ;;
+  rm)
+    rundir=$(run_dir "${1:?usage: isolated-node rm <run>}")
+    runs=$(realpath -e "$RUNS")
+    # only ever a run-* dir directly under the runs dir: never the golden DB,
+    # never runs/keys
+    if [ "$(dirname "$rundir")" != "$runs" ] || [[ $(basename "$rundir") != run-* ]]; then
+      echo "refusing: $rundir is not a run dir (expected $runs/run-*)" >&2
+      exit 1
+    fi
+    # producer, follower and ogmios containers all carry the run as a label
+    up=$(docker ps --filter "label=devnet.fork.run=$rundir" --format '{{.Names}}')
+    if [ -n "$up" ]; then
+      echo "refusing: $rundir is in use by running containers; stop them first:" >&2
+      echo "$up" | sed 's/^/  /' >&2
+      exit 1
+    fi
+    # the kept containers' logs belong to this run; they go with it
+    docker ps -a --filter "label=devnet.fork.run=$rundir" --format '{{.ID}} {{.Names}}' |
+      while read -r id cname; do
+        docker rm "$id" >/dev/null && echo "removed container $cname"
+      done
+    rm -rf "$rundir"
+    echo "removed $rundir"
+    ;;
   *)
-    sed -n '3,28p' "$0"
+    sed -n '3,32p' "$0"
     exit 1
     ;;
 esac
