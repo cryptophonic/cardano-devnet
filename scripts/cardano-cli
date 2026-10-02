@@ -36,6 +36,30 @@ if [ -z ${clipath+x} ]; then
      [ "$(dirname "$CARDANO_NODE_SOCKET_PATH")" != "$DEVNET_ROOT/runtime/ipc" ]; then
     export ISOLATED_IPC=$(dirname "$CARDANO_NODE_SOCKET_PATH")
   fi
+  # Same for --socket-path (either form), which takes precedence over the env
+  # var as it does for cardano-cli itself: mount the socket's directory over
+  # /runtime/ipc and point the flag at the socket there. args and newargs line
+  # up one to one, so the index from one rewrites the other.
+  args=("$@")
+  for ((n = 0; n < ${#args[@]}; n++)); do
+    case ${args[n]} in
+      --socket-path)   sock=${args[n+1]:-}; at=$((n+1)); pre= ;;
+      --socket-path=*) sock=${args[n]#--socket-path=}; at=$n; pre=--socket-path= ;;
+      *) continue ;;
+    esac
+    [ -n "$sock" ] || continue
+    sock=$(realpath -m "$sock")
+    dir=$(dirname "$sock")
+    if [ "$dir" = "$DEVNET_ROOT/runtime/ipc" ]; then
+      # the devnet's own socket: undo any remount from the env var
+      unset ISOLATED_IPC
+      newargs[at]=$pre/runtime/ipc/$(basename "$sock")
+    elif [ -d "$dir" ]; then
+      # only an existing dir: docker would create a missing one as root
+      export ISOLATED_IPC=$dir
+      newargs[at]=$pre/runtime/ipc/$(basename "$sock")
+    fi
+  done
   exec docker compose -f $DEVNET_ROOT/docker-compose.yml run --rm -T cardano-cli "${newargs[@]}"
 else 
   exec $clipath/cardano-cli "${@:1}"
