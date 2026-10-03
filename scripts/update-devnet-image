@@ -16,7 +16,6 @@
 #   docker-compose.yml
 #   scripts/isolated-node
 #   scripts/follower-node
-#   scripts/devnet-fork
 
 set -euo pipefail
 
@@ -27,7 +26,6 @@ FILES=(
   "$ROOT/docker-compose.yml"
   "$ROOT/scripts/isolated-node"
   "$ROOT/scripts/follower-node"
-  "$ROOT/scripts/devnet-fork"
 )
 
 list_tags() {

@@ -28,10 +28,11 @@ building and pushing it (Dockerfile, build-faketime, publish) lives in the
 separate `fork-mode` repo, which is also the parent of the patched
 cardano-node source.
 
-## Fork mode (`fork-mode` branch)
+## Runs and snapshots (the generic layer)
 
-Fork mode runs a patched node against a snapshot of a real preview chain.
-The scripts carry their own usage notes in their headers — read those first:
+Any chain DB can be cloned into an isolated, numbered run directory and run
+by its own node. The scripts carry their own usage notes in their headers —
+read those first:
 
 - `scripts/new-run` — build a numbered run directory from any run source (CoW
   clone of its DB, isolated config/topology, forging credentials). Sources are
@@ -44,28 +45,24 @@ The scripts carry their own usage notes in their headers — read those first:
   its socket. Fully isolated: the Unix socket is the only way in or out.
 - `scripts/set-faketime` — shift a run's clock so a stale DB stays inside the
   ledger's forecast horizon.
-- `src/fork/` — the fork SDK: `openFork(name)` gives a `Fork` with `tip()`,
-  `now()`, `warpTo()`, `setRate()` and `impersonate(address)`, over a Blaze
-  provider backed by the fork's own ogmios sidecar
-  (`devnet fork ogmios start <n>`). See `src/fork/fork.mjs` for the usage sketch
-  and `test/fork-sdk-*.mjs` for runnable examples.
 
-Conventions that matter:
+Convention that matters: **never run a node against the golden DB.** It is
+the read-only master copy. Always work in a numbered run directory produced
+by `new-run` (reflink/CoW clone, so copies are cheap on XFS/btrfs). Locations
+are configurable: `GOLDEN_DB`, `RUNS_DIR`, `CARDANO_CLI_BIN`.
 
-- **Never run a node against the golden DB.** It is the read-only master copy.
-  Always work in a numbered run directory produced by `new-run`
-  (reflink/CoW clone, so copies are cheap on XFS/btrfs). Locations are
-  configurable: `GOLDEN_DB`, `RUNS_DIR`, `CARDANO_CLI_BIN`.
-- Fork-mode experiments are recorded as markdown fixtures in `test/fixtures/`,
-  one file per question, each stating the image, node/cli versions and the run
-  it came from. Add a fixture when you establish a new ledger behaviour; that
-  directory is the durable record.
+Fork mode — running a patched node against a snapshot of a real preview
+chain, with the fork SDK, impersonation, clock warping and the fork panel —
+lives in the separate [adafork](https://github.com/cryptophonic/adafork)
+repo, which builds on this layer (it requires `DEVNET_ROOT` pointing at this
+checkout). The fork-mode ledger-behaviour fixtures moved there too
+(`server/test/fixtures/`).
 
 ## Repo layout
 
 - `scripts/` — all entry points (`start-cardano-devnet`, `fund`, `monitor`,
-  `indexer`, `explorer`, fork-mode tooling).
-- `src/` — node-side JS: monitor, indexer, fund, Blaze/Lucid provider, fork SDK.
+  `indexer`, `explorer`, run/snapshot tooling).
+- `src/` — node-side JS: monitor, indexer, fund, Blaze/Lucid provider.
 - `explorer/` — SvelteKit web explorer (its own `npm install`).
 - `config/` — genesis, credentials and node config for the local devnet.
 - `docker-compose.yml` — service definitions (the image itself is built and
