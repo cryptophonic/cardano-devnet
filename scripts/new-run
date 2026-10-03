@@ -1,0 +1,305 @@
+#!/bin/bash
+
+# Build a numbered run directory for an isolated node, from any run source:
+#   - reflink clone of the source DB (copy-on-write; the source stays read-only)
+#   - genesis + config from the source's config dir, with the isolated overrides
+#   - topology that can neither dial nor be dialled
+#   - forging credentials: the source's own, if it carries them (a devnet
+#     snapshot made by scripts/snapshot does); otherwise the shared fork
+#     identity in <RUNS>/keys plus a freshly issued opcert at the CURRENT KES
+#     period (the golden preview DB case)
+#   - optionally a fork.env with the fork gates (fork sources only)
+#
+# A run source is a directory holding db/ and config/, where config/ has the
+# node config (config.json, or cardano-node.json) and the genesis files it
+# references. Two kinds exist today:
+#   - the golden preview DB (GOLDEN_DB, default /mnt/cardano/preview): no
+#     credentials of its own, so the fork identity + god key are generated in
+#     <RUNS>/keys on first use and shared by every run
+#   - a devnet snapshot (scripts/snapshot): self-credentialed, so building a
+#     run from it needs no key generation and no cardano-cli at all
+#
+# Usage:
+#   new-run [--start] [--from <source>] <N>                      # gates unset
+#   new-run [--start] [--from <source>] <N> <fork slot> <block every>  # gates set
+#
+# --from defaults to the golden DB. Fork gates only make sense against a fork
+# source (they name the god key and pool id of the generated fork identity);
+# asking for them on a self-credentialed source is refused.
+#
+# This only builds the run dir. Start the node with isolated-node start <N>,
+# or pass --start to do both.
+#
+# FOLLOWER=1 builds a run that FOLLOWS another node instead of forging alone:
+# one local root at 127.0.0.1:${FOLLOWER_OF_PORT:-3001}, peer targets of 1
+# instead of 0, and the Prometheus port moved off the forger's. It is meant to
+# be started with scripts/follower-node, which puts it inside the forger's own
+# network namespace -- so the pair can talk while the namespace still contains
+# nothing but lo. Give it the same fork gates as the forger (so it accepts the
+# forged blocks) but no BLOCK_EVERY, since it is not forging.
+#
+# FORK_NOW=<ISO8601 UTC, e.g. 2026-09-21T22:08:14Z> overrides "now" for the
+# opcert's KES period (fork sources only -- a snapshot's opcert is reused
+# as-is). Only needed when the run will start immediately under a faked clock
+# (scripts/set-faketime): the OCERT rule checks the opcert's KES period against
+# the node's OWN clock, so an opcert issued at the real-now period is
+# future-dated (rejected) once that node's clock is faked backward.
+#
+# Then: isolated-node start <N>
+
+set -euo pipefail
+
+GOLDEN=${GOLDEN_DB:-/mnt/cardano/preview}
+RUNS=${RUNS_DIR:-/mnt/cardano/runs}
+KEYS=$RUNS/keys
+CLI=${CARDANO_CLI_BIN:-/mnt/cardano/bin/cardano-cli}
+
+START=
+FROM=
+args=()
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --start) START=1; shift ;;
+    --from)  FROM=${2:?--from needs a source dir}; shift 2 ;;
+    *) args+=("$1"); shift ;;
+  esac
+done
+set -- "${args[@]+"${args[@]}"}"
+
+N=${1:?usage: new-run [--start] [--from <source>] <N> [fork-slot block-every]}
+# run-<N> names the same run, as it does for isolated-node and devnet-fork
+N=${N#run-}
+RUN=$RUNS/run-$N
+[ -e "$RUN" ] && { echo "refusing: $RUN already exists (run dirs are never reused)" >&2; exit 1; }
+
+SRC=$(cd "${FROM:-$GOLDEN}" 2>/dev/null && pwd) || {
+  echo "no such source dir: ${FROM:-$GOLDEN}" >&2; exit 1; }
+[ -d "$SRC/db" ] && [ -d "$SRC/config" ] || {
+  echo "not a run source: $SRC (need db/ and config/)" >&2; exit 1; }
+
+# the source's node config, whichever name it uses
+if   [ -f "$SRC/config/config.json" ];       then SRC_CONFIG=config.json
+elif [ -f "$SRC/config/cardano-node.json" ]; then SRC_CONFIG=cardano-node.json
+else echo "no node config in $SRC/config (config.json or cardano-node.json)" >&2; exit 1
+fi
+
+# self-credentialed source (devnet snapshot) vs fork source (golden DB)
+CREDENTIALED=
+if [ -f "$SRC/config/kes.skey" ] && [ -f "$SRC/config/vrf.skey" ] &&
+   { [ -f "$SRC/config/node.opcert" ] || [ -f "$SRC/config/opcert.cert" ]; }; then
+  CREDENTIALED=1
+fi
+
+if [ -n "$CREDENTIALED" ] && [ $# -ge 2 ]; then
+  echo "refusing: fork gates against a self-credentialed source make no sense" >&2
+  echo "(the gates name the generated fork identity, which this run does not use)" >&2
+  exit 1
+fi
+
+if [ -z "$CREDENTIALED" ]; then
+  # first use: generate the fork identity. It is not part of the golden chain
+  # and never lives in the golden dir; it is shared by every run, in
+  # <RUNS>/keys, and generated there on first use.
+  mkdir -p "$KEYS"
+  if [ ! -e "$KEYS/cold.vkey" ]; then
+    echo "generating fork pool keys in $KEYS"
+    $CLI latest node key-gen \
+      --cold-verification-key-file "$KEYS/cold.vkey" \
+      --cold-signing-key-file "$KEYS/cold.skey" \
+      --operational-certificate-issue-counter-file "$KEYS/opcert.counter"
+    $CLI latest node key-gen-KES \
+      --verification-key-file "$KEYS/kes.vkey" \
+      --signing-key-file "$KEYS/kes.skey"
+    $CLI latest node key-gen-VRF \
+      --verification-key-file "$KEYS/vrf.vkey" \
+      --signing-key-file "$KEYS/vrf.skey"
+  fi
+  if [ ! -e "$KEYS/god.vkey" ]; then
+    echo "generating god key in $KEYS"
+    $CLI latest address key-gen \
+      --verification-key-file "$KEYS/god.vkey" \
+      --signing-key-file "$KEYS/god.skey"
+  fi
+  chmod 600 "$KEYS"/*.skey
+fi
+
+# a half-built run dir would block the name forever, so remove it on failure
+trap '[ $? -eq 0 ] || { echo "failed; removing $RUN" >&2; rm -rf "$RUN"; }' EXIT
+
+mkdir -p "$RUN/chain" "$RUN/ipc"
+
+if [ -n "$CREDENTIALED" ]; then
+  # a snapshot DB is small: copy-on-write where the filesystem offers it,
+  # plain copy where it doesn't (BSD/macOS cp: -c clones on APFS)
+  if cp --version >/dev/null 2>&1; then
+    cp -a --reflink=auto "$SRC/db" "$RUN/db"
+  else
+    cp -ac "$SRC/db" "$RUN/db" 2>/dev/null || cp -a "$SRC/db" "$RUN/db"
+  fi
+else
+  # the golden DB is huge: copy-on-write clone, failing loudly rather than
+  # silently falling back to a full copy
+  cp -a --reflink=always "$SRC/db" "$RUN/db"
+fi
+
+for f in "$SRC"/config/*.json; do
+  case $(basename "$f") in
+    snapshot.json) continue ;;                     # source provenance, not node config
+    "$SRC_CONFIG") ;;                              # the node config, kept below
+    config.json|cardano-node.json) continue ;;     # a second spelling of it
+  esac
+  cp -a "$f" "$RUN/chain/"
+done
+chmod -R u+w "$RUN/chain"
+# the isolated node reads chain/config.json, whatever the source called it
+[ "$SRC_CONFIG" = config.json ] || mv "$RUN/chain/$SRC_CONFIG" "$RUN/chain/config.json"
+
+if [ -n "$CREDENTIALED" ]; then
+  cp -a "$SRC/config/kes.skey" "$SRC/config/vrf.skey" "$RUN/chain/"
+  if [ -f "$SRC/config/node.opcert" ]; then
+    cp -a "$SRC/config/node.opcert" "$RUN/chain/node.opcert"
+  else
+    cp -a "$SRC/config/opcert.cert" "$RUN/chain/node.opcert"
+  fi
+  chmod u+w "$RUN/chain"/kes.skey "$RUN/chain"/vrf.skey "$RUN/chain"/node.opcert
+  echo "credentials: reused from source (no opcert issued)"
+else
+  cp -a "$KEYS"/kes.skey "$KEYS"/vrf.skey "$RUN/chain/"
+
+  # Each run starts from the same golden ledger state, where the pool's opcert
+  # counter is 0. The OCERT rule only accepts a cert whose issue number is
+  # within +1 of that, so every run must issue number 0 -- hence a per-run
+  # counter file rather than the golden one, which would creep up and cause
+  # CounterOverIncrementedOCERT once it passed 1.
+  $CLI latest node new-counter \
+    --cold-verification-key-file "$KEYS/cold.vkey" \
+    --counter-value 0 \
+    --operational-certificate-issue-counter-file "$RUN/chain/opcert.counter"
+
+  # opcert at the current KES period (fork-mode rule), or FORK_NOW's period if
+  # set (see usage above -- needed when the node will start under a faked clock)
+  KES=$(python3 -c "
+import datetime, json, os
+cfg = json.load(open('$RUN/chain/config.json'))
+g = json.load(open('$RUN/chain/' + cfg['ShelleyGenesisFile'].split('/')[-1]))
+s = datetime.datetime.strptime(g['systemStart'], '%Y-%m-%dT%H:%M:%SZ').replace(tzinfo=datetime.timezone.utc)
+override = os.environ.get('FORK_NOW')
+now = (datetime.datetime.strptime(override, '%Y-%m-%dT%H:%M:%SZ').replace(tzinfo=datetime.timezone.utc)
+       if override else datetime.datetime.now(datetime.timezone.utc))
+print(int((now - s).total_seconds() / g['slotLength']) // g['slotsPerKESPeriod'])")
+  $CLI latest node issue-op-cert \
+    --kes-verification-key-file "$KEYS/kes.vkey" \
+    --cold-signing-key-file "$KEYS/cold.skey" \
+    --operational-certificate-issue-counter "$RUN/chain/opcert.counter" \
+    --kes-period "$KES" \
+    --out-file "$RUN/chain/node.opcert"
+  echo "opcert issued at KES period $KES"
+fi
+
+# isolated config + topology
+python3 - "$RUN" <<'PY'
+import json, os, sys
+run = sys.argv[1]
+follower = os.environ.get('FOLLOWER') == '1'
+c = json.load(open(f'{run}/chain/config.json'))
+c.update({
+    "EnableP2P": True,
+    "PeerSharing": False,
+    # Genesis/LoE off: the node selects its own chain with no peers
+    "ConsensusMode": "PraosMode",
+    "TargetNumberOfRootPeers": 0,
+    "TargetNumberOfKnownPeers": 0,
+    "TargetNumberOfEstablishedPeers": 0,
+    "TargetNumberOfActivePeers": 0,
+    "TargetNumberOfKnownBigLedgerPeers": 0,
+    "TargetNumberOfEstablishedBigLedgerPeers": 0,
+    "TargetNumberOfActiveBigLedgerPeers": 0,
+})
+t = c.setdefault("TraceOptions", {})
+# Steady state should be nothing but "Chain extended" (a Notice). Stock
+# configs turn a dozen tracers up to Info; drop those back to the root
+# severity so only Notice and above survive. Costs the startup/replay progress
+# lines too, which is the intended trade.
+for opts in t.values():
+    if isinstance(opts, dict) and opts.get("severity") == "Info":
+        opts["severity"] = "Notice"
+# local client connects (cardano-cli query tip) are expected here and would
+# otherwise log a CleanExit pair per probe
+t["Net.Mux.Local"] = {"severity": "Warning"}
+# the parent namespace does not cover these: each local client connect emits
+# Bearer/Channel traces at Info regardless, and a tx-building session opens
+# dozens of short-lived connections
+t["Net.Mux.Local.Bearer"] = {"severity": "Silence"}
+t["Net.Mux.Local.Channel"] = {"severity": "Silence"}
+# the per-slot leader-check chatter: one pair of lines every second. The
+# interesting outcomes (NodeIsLeader, ForgedBlock, AdoptedBlock) stay at Info.
+t["Forge.Loop.StartLeadershipCheck"] = {"severity": "Silence"}
+t["Forge.Loop.NodeNotLeader"] = {"severity": "Silence"}
+# the KES countdown, also once per slot. KES expiry is visible from the opcert
+# and the run is short-lived, so nothing is lost by silencing it.
+t["Forge.StateInfo"] = {"severity": "Silence"}
+# Why a tx was rejected. cardano-cli cannot decode ForkModeExtraneousWitness
+# (a new ConwayUtxowPredFailure constructor, CBOR key 19) and reports it as a
+# DeserialiseFailure instead, so the node trace is the only legible source.
+# DMaximum is what puts err.reason in the line.
+t["Mempool.RejectedTx"] = {"severity": "Info", "detail": "DMaximum"}
+topo = {"bootstrapPeers": None, "localRoots": [], "publicRoots": [],
+        "useLedgerAfterSlot": -1}
+
+if follower:
+    # A follower shares the FORGER'S network namespace (see scripts/
+    # follower-node), so "the other node" is reachable at 127.0.0.1 and the
+    # namespace still holds nothing but lo -- the isolation property is
+    # untouched. Everything below is the difference between a node that must
+    # not talk to anyone and one that must talk to exactly one peer.
+    port = int(os.environ.get('FOLLOWER_OF_PORT', '3001'))
+    topo["localRoots"] = [{
+        "accessPoints": [{"address": "127.0.0.1", "port": port}],
+        "advertise": False,
+        "trustable": True,
+        "hotValency": 1,
+        "warmValency": 1,
+    }]
+    # the isolated config zeroes every peer target; a follower needs exactly one
+    for k in ("TargetNumberOfRootPeers", "TargetNumberOfKnownPeers",
+              "TargetNumberOfEstablishedPeers", "TargetNumberOfActivePeers"):
+        c[k] = 1
+    # both nodes live in ONE network namespace, so the forger already owns
+    # 12798 -- a second bind there would fail
+    c["TraceOptions"][""]["backends"] = [
+        b.replace("12798", "12799") if "Prometheus" in b else b
+        for b in c["TraceOptions"][""]["backends"]]
+    # a follower adopting someone else's chain rolls back and switches forks as
+    # a matter of course; those are the events the sync check is about
+    for ns in ("ChainDB.AddBlockEvent.SwitchedToAFork",
+               "ChainDB.AddBlockEvent.AddedBlockToQueue"):
+        t.pop(ns, None)
+
+json.dump(c, open(f'{run}/chain/config.json', 'w'), indent=2)
+
+# bootstrapPeers must be null, not []: an empty list means "bootstrap mode with
+# zero trustable peers", which 11.1.2 rejects outright
+json.dump(topo, open(f'{run}/chain/topology.json', 'w'), indent=2)
+PY
+
+# The validation gates and the forging cadence are separable: a follower needs
+# the first three (or it would reject the forger's blocks exactly the way a
+# stock node does) but must not have the fourth.
+if [ $# -ge 2 ]; then
+  cat > "$RUN/chain/fork.env" <<EOF
+CARDANO_FORK_SLOT=$2
+CARDANO_FORK_GOD_KEY=$($CLI latest address key-hash --payment-verification-key-file "$KEYS/god.vkey")
+CARDANO_FORK_POOL_ID=$($CLI latest stake-pool id --cold-verification-key-file "$KEYS/cold.vkey" --output-format hex)
+EOF
+  [ $# -ge 3 ] && echo "CARDANO_FORK_BLOCK_EVERY=$3" >> "$RUN/chain/fork.env"
+  echo "fork gates:"; sed 's/^/  /' "$RUN/chain/fork.env"
+else
+  echo "fork gates: none (unset)"
+fi
+
+if [ -n "$START" ]; then
+  echo "run dir ready: $RUN; starting"
+  exec "$(dirname "$0")/isolated-node" start "$RUN"
+fi
+echo "run dir ready: $RUN"
+echo "node NOT started; run: isolated-node start $N"

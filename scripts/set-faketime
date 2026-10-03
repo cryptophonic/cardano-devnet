@@ -40,8 +40,10 @@
 #                       real pace while wall time runs away from them. Which one
 #                       a given rate wants is an empirical question -- measure it.
 #
-# Slot and wall-clock are exactly 1:1 on preview (slotLength=1s):
-#   time = systemStart + slot seconds, systemStart from shelley-genesis.json.
+# Slot to wall-clock is linear from genesis (preview and the devnet both run
+# slotLength=1s, but the value is read from the run's own shelley genesis,
+# found via chain/config.json's ShelleyGenesisFile):
+#   time = systemStart + slot * slotLength.
 # Don't reconstruct this from era history elsewhere; it's already this simple.
 #
 # Precision doesn't matter much -- the horizon is hours wide -- so this adds a
@@ -51,7 +53,7 @@
 # NOTE: the run's operational certificate must be issued at the KES period
 # that covers the faketime target, not the period covering real "now". A run
 # created fresh for a faketime test should pass FORK_NOW to
-# scripts/new-isolated-run (see its usage) rather than relying on this script
+# scripts/new-run (see its usage) rather than relying on this script
 # to fix up an already-issued opcert.
 
 set -euo pipefail
@@ -93,9 +95,10 @@ fi
 
 faketime=$(python3 -c "
 import datetime, json
-g = json.load(open('$rundir/chain/shelley-genesis.json'))
+cfg = json.load(open('$rundir/chain/config.json'))
+g = json.load(open('$rundir/chain/' + cfg['ShelleyGenesisFile'].split('/')[-1]))
 s = datetime.datetime.strptime(g['systemStart'], '%Y-%m-%dT%H:%M:%SZ').replace(tzinfo=datetime.timezone.utc)
-t = s + datetime.timedelta(seconds=$slot + $LEAD)
+t = s + datetime.timedelta(seconds=$slot * g['slotLength'] + $LEAD)
 print(f'@{t:%Y-%m-%d %H:%M:%S}')
 ")
 

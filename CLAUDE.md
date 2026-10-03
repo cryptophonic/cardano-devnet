@@ -33,8 +33,13 @@ cardano-node source.
 Fork mode runs a patched node against a snapshot of a real preview chain.
 The scripts carry their own usage notes in their headers — read those first:
 
-- `scripts/new-isolated-run` — build a numbered run directory (CoW clone of the
-  golden DB, isolated config/topology, KES/VRF keys, fresh opcert).
+- `scripts/new-run` — build a numbered run directory from any run source (CoW
+  clone of its DB, isolated config/topology, forging credentials). Sources are
+  the golden preview DB (keys + fresh opcert generated) or a devnet snapshot
+  made by `scripts/snapshot` (self-credentialed; needs no cardano-cli at all).
+  `scripts/new-isolated-run` is a back-compat shim for it.
+- `scripts/snapshot` — freeze the local devnet (clean stop/copy/restart) into
+  a run source under `snapshots/`, same db/+config/ shape as the golden dir.
 - `scripts/isolated-node` — start/stop/log a run, or run `cardano-cli` against
   its socket. Fully isolated: the Unix socket is the only way in or out.
 - `scripts/set-faketime` — shift a run's clock so a stale DB stays inside the
@@ -48,7 +53,7 @@ The scripts carry their own usage notes in their headers — read those first:
 Conventions that matter:
 
 - **Never run a node against the golden DB.** It is the read-only master copy.
-  Always work in a numbered run directory produced by `new-isolated-run`
+  Always work in a numbered run directory produced by `new-run`
   (reflink/CoW clone, so copies are cheap on XFS/btrfs). Locations are
   configurable: `GOLDEN_DB`, `RUNS_DIR`, `CARDANO_CLI_BIN`.
 - Fork-mode experiments are recorded as markdown fixtures in `test/fixtures/`,

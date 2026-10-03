@@ -13,7 +13,7 @@
 #   isolated-node status [<run>]     # fork containers and their runs
 #   isolated-node rm <run>           # delete a run dir and its stopped containers
 #
-# <run> is a run name as given to new-isolated-run (mark-test, or run-mark-test,
+# <run> is a run name as given to new-run (mark-test, or run-mark-test,
 # means $RUNS_DIR/run-mark-test), or a path to a run dir if it contains a slash.
 #
 # Several forks can run at once. Each run directory gets its own container,
@@ -39,12 +39,15 @@ export MY_GID=${MY_GID:-$(id -g)}
 
 RUNS=${RUNS_DIR:-/mnt/cardano/runs}
 
+# existing dir -> absolute path (GNU realpath -e, but portable to BSD/macOS)
+abs_dir() { (cd "$1" 2>/dev/null && pwd) || { echo "no such run dir: $1" >&2; return 1; } }
+
 # <run> -> existing run dir, accepting what devnet-fork's resolve_run does
 run_dir() {
   case $1 in
-    */*)   realpath -e "$1" ;;
-    run-*) realpath -e "$RUNS/$1" ;;
-    *)     realpath -e "$RUNS/run-$1" ;;
+    */*)   abs_dir "$1" ;;
+    run-*) abs_dir "$RUNS/$1" ;;
+    *)     abs_dir "$RUNS/run-$1" ;;
   esac
 }
 
@@ -170,11 +173,14 @@ case "$cmd" in
     if [ -z "$rows" ]; then
       echo "no fork containers${rundir:+ for $rundir}"
     else
-      runs=$(realpath -m "$RUNS")
-      while IFS='|' read -r run role name state status; do
-        [ "$(dirname "$run")" = "$runs" ] && run=${run##*/run-}
-        printf '%s|%s|%s|%s\n' "$run" "$role" "$name" "$status"
-      done <<<"$rows" | sort | column -t -s'|' -N RUN,ROLE,CONTAINER,STATUS
+      runs=$( (cd "$RUNS" 2>/dev/null && pwd) || echo "$RUNS")
+      # header as a first row rather than column -N, which macOS column lacks
+      { echo 'RUN|ROLE|CONTAINER|STATUS'
+        while IFS='|' read -r run role name state status; do
+          [ "$(dirname "$run")" = "$runs" ] && run=${run##*/run-}
+          printf '%s|%s|%s|%s\n' "$run" "$role" "$name" "$status"
+        done <<<"$rows" | sort
+      } | column -t -s'|'
     fi
     if [ -n "$rundir" ]; then
       if [ -S "$rundir/ipc/node.socket" ]; then
@@ -192,7 +198,7 @@ case "$cmd" in
     ;;
   rm)
     rundir=$(run_dir "${1:?usage: isolated-node rm <run>}")
-    runs=$(realpath -e "$RUNS")
+    runs=$(abs_dir "$RUNS") || exit 1
     # only ever a run-* dir directly under the runs dir: never the golden DB,
     # never runs/keys
     if [ "$(dirname "$rundir")" != "$runs" ] || [[ $(basename "$rundir") != run-* ]]; then

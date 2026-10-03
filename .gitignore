@@ -1,5 +1,7 @@
 .env
 runtime
+# Devnet snapshots (scripts/snapshot): local state, same footing as runtime/
+snapshots
 node_modules
 package-lock.json
 cardano-devnet.log

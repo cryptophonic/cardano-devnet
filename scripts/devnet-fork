@@ -32,7 +32,7 @@
 # <n> is a fork name; the directory is <RUNS_DIR>/run-<n>. A run directory
 # path is accepted anywhere a name is.
 #
-# This wraps scripts/new-isolated-run, scripts/isolated-node,
+# This wraps scripts/new-run, scripts/isolated-node,
 # scripts/set-faketime and scripts/follower-node rather than duplicating them.
 # Two things it does that they do not: it defaults the accelerated clock to
 # Arm 2 (CLOCK_MONOTONIC faked -- fixture fork-mode-rate-and-epoch.md 9a shows
@@ -59,7 +59,7 @@ set -euo pipefail
 DEVNET_ROOT=${DEVNET_ROOT:-$(git -C "$(dirname "$0")" rev-parse --show-toplevel)}
 SCRIPTS=$DEVNET_ROOT/scripts
 RUNS=${RUNS_DIR:-/mnt/cardano/runs}
-# the fork identity (pool + god keys), shared by every run; new-isolated-run
+# the fork identity (pool + god keys), shared by every run; new-run
 # generates it on first use
 KEYS=$RUNS/keys
 CLI=${CARDANO_CLI_BIN:-/mnt/cardano/bin/cardano-cli}
@@ -239,7 +239,7 @@ chaindb_tip() {
   trap "\"$SCRIPTS/isolated-node\" stop >/dev/null 2>&1 || true; rm -rf '$probe'" RETURN
   rm -rf "$probe"
   GOLDEN_DB=$source RUNS_DIR=$RUNS CARDANO_CLI_BIN=$CLI \
-    "$SCRIPTS/new-isolated-run" "$probe_name" >/dev/null
+    "$SCRIPTS/new-run" "$probe_name" >/dev/null
   "$SCRIPTS/isolated-node" start "$probe" >/dev/null 2>&1
 
   local tip=""
@@ -394,7 +394,7 @@ print(f'{slot_to_time($slot + 10):%Y-%m-%dT%H:%M:%SZ}')" "$source/config/shelley
 
   echo "building run directory (reflink clone of $source/db)..."
   FORK_NOW=$fork_now GOLDEN_DB=$source RUNS_DIR=$RUNS CARDANO_CLI_BIN=$CLI \
-    "$SCRIPTS/new-isolated-run" "$name" "$slot" "$block_every"
+    "$SCRIPTS/new-run" "$name" "$slot" "$block_every"
 
   # --- an explicit --slot behind the ImmutableDB tip is a real truncation:
   # db-truncater rewrites the ImmutableDB, and everything volatile is above
@@ -486,7 +486,7 @@ write_manifest() {
            --payment-verification-key-file "$KEYS/god.vkey" \
            --testnet-magic "$(network_magic "$network")" 2>/dev/null || true)
   # the opcert was issued at the KES period of the faked clock, which
-  # new-isolated-run was pointed at via FORK_NOW = fork slot + the 10s lead
+  # new-run was pointed at via FORK_NOW = fork slot + the 10s lead
   kes=$(python3 -c "$(genesis_py)
 print(kes_of($slot + 10))" "$run/chain/shelley-genesis.json")
 
@@ -1819,7 +1819,7 @@ cmd_follow() {
 print(f'{slot_to_time($(mget "$src" fork.slot) + 10):%Y-%m-%dT%H:%M:%SZ}')" \
       "$busy/chain/shelley-genesis.json") \
       GOLDEN_DB=${GOLDEN_DB:-/mnt/cardano/preview} RUNS_DIR=$RUNS CARDANO_CLI_BIN=$CLI \
-      "$SCRIPTS/new-isolated-run" "$fname" "$(mget "$src" fork.slot)"
+      "$SCRIPTS/new-run" "$fname" "$(mget "$src" fork.slot)"
   fi
 
   # The follower's clock is set AFTER it is up, from the forger's actual clock.

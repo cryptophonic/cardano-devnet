@@ -1,0 +1,90 @@
+#!/bin/bash
+
+# Freeze the local devnet into a reusable run source: a directory with the
+# same shape as the golden fork source (db/ + config/), so scripts/new-run can
+# clone isolated runs from it exactly as it clones them from a preview golden
+# DB.
+#
+# Usage:
+#   snapshot <name>          # snapshot the devnet into $SNAPSHOTS_DIR/<name>
+#
+# The devnet node (devnet-cardano-node) is stopped cleanly for the copy and
+# restarted afterwards if it was running -- a ChainDB copied out from under a
+# live node may be unopenable. Ogmios and the explorer just see a short gap.
+#
+# Unlike the preview golden DB, a devnet snapshot carries its own forging
+# identity (kes.skey, vrf.skey, opcert from config/genesis), so runs built
+# from it need no key generation and no cardano-cli at all.
+#
+# Locations:
+#   SNAPSHOTS_DIR   where snapshots live (default $DEVNET_ROOT/snapshots)
+
+set -euo pipefail
+
+DEVNET_ROOT=${DEVNET_ROOT:-$(git -C "$(dirname "$0")" rev-parse --show-toplevel)}
+SNAPSHOTS=${SNAPSHOTS_DIR:-$DEVNET_ROOT/snapshots}
+
+NAME=${1:?usage: snapshot <name>}
+DEST=$SNAPSHOTS/$NAME
+[ -e "$DEST" ] && { echo "refusing: $DEST already exists (snapshots are never overwritten)" >&2; exit 1; }
+
+DATA=$DEVNET_ROOT/runtime/data
+CHAIN=$DEVNET_ROOT/runtime/chain
+[ -d "$DATA" ] && [ -d "$CHAIN" ] || {
+  echo "no devnet runtime at $DEVNET_ROOT/runtime (need data/ and chain/)" >&2; exit 1; }
+
+# copy-on-write where the filesystem offers it, plain copy where it doesn't
+# (GNU cp: --reflink=auto; BSD/macOS cp: -c clones on APFS)
+clone() {
+  if cp --version >/dev/null 2>&1; then
+    cp -a --reflink=auto "$1" "$2"
+  else
+    cp -ac "$1" "$2" 2>/dev/null || cp -a "$1" "$2"
+  fi
+}
+
+# a half-built snapshot would block the name forever; remove it on failure
+trap '[ $? -eq 0 ] || { echo "failed; removing $DEST" >&2; rm -rf "$DEST"; }' EXIT
+
+# stop the node for a consistent DB, restart it after if it was running
+RESTART=
+if docker ps --format '{{.Names}}' | grep -qx devnet-cardano-node; then
+  echo "stopping devnet-cardano-node for a consistent copy"
+  docker stop devnet-cardano-node >/dev/null
+  RESTART=1
+fi
+
+mkdir -p "$DEST"
+clone "$DATA" "$DEST/db"
+clone "$CHAIN" "$DEST/config"
+
+if [ -n "$RESTART" ]; then
+  # the stopped node leaves its socket file behind, and binding over it is a
+  # startup crash (DiffusionErrored); clear it so the restart succeeds first try
+  rm -f "$DEVNET_ROOT/runtime/ipc/node.socket"
+  docker start devnet-cardano-node >/dev/null
+  echo "restarted devnet-cardano-node"
+fi
+
+# normalise to the run layout: the isolated node reads chain/config.json and
+# chain/node.opcert, the devnet spells them cardano-node.json and opcert.cert
+chmod -R u+w "$DEST/config"
+[ -f "$DEST/config/config.json" ] || cp "$DEST/config/cardano-node.json" "$DEST/config/config.json"
+[ -f "$DEST/config/node.opcert" ] || cp "$DEST/config/opcert.cert" "$DEST/config/node.opcert"
+
+# provenance: what this is and when it was cut
+python3 - "$DEST" <<'PY'
+import datetime, json, sys
+dest = sys.argv[1]
+cfg = json.load(open(f'{dest}/config/config.json'))
+g = json.load(open(f'{dest}/config/{cfg["ShelleyGenesisFile"].split("/")[-1]}'))
+json.dump({
+    "source": "devnet",
+    "created": datetime.datetime.now(datetime.timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ'),
+    "networkMagic": g["networkMagic"],
+    "systemStart": g["systemStart"],
+}, open(f'{dest}/snapshot.json', 'w'), indent=2)
+PY
+
+echo "snapshot ready: $DEST"
+echo "clone a run from it with: new-run --from $DEST <N>"
