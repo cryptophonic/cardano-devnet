@@ -2,7 +2,7 @@
 
 # Write (or clear) <run dir>/chain/faketime.env, which scripts/isolated-node
 # picks up automatically: it shifts the isolated node's clock via LD_PRELOAD'd
-# libfaketime (docker/Dockerfile, scripts/build-faketime) so "now" lands just
+# libfaketime (baked into the image by the fork-mode repo's image/) so "now" lands just
 # past a stale DB's tip -- inside the ledger's ~7.2h forecast horizon on
 # preview -- instead of failing leadership checks with NoLedgerView /
 # CurrentSlotUnknown against a chain that real time has left behind.
@@ -24,10 +24,10 @@
 #                       point libfaketime at it (FAKETIME_TIMESTAMP_FILE) instead
 #                       of baking it into FAKETIME. The node re-reads that file
 #                       while it runs, so the clock can be changed WITHOUT a
-#                       restart -- which is what `devnet fork warp` uses, and what
-#                       lets a follower be synchronised after it is already up
-#                       rather than guessing a lead. See
-#                       test/fixtures/fork-mode-clock-signal.md.
+#                       restart -- which is what adafork's `devnet-fork warp`
+#                       uses, and what lets a follower be synchronised after it
+#                       is already up rather than guessing a lead. See adafork's
+#                       server/test/fixtures/fork-mode-clock-signal.md.
 #                       Note a rewrite RE-ANCHORS the speed-up at the moment the
 #                       file is read, so a stamp is "the clock is X now", not an
 #                       offset to add to wherever the clock had got to.
@@ -83,7 +83,7 @@ while [ $# -gt 0 ]; do
 done
 
 if [ -z "$slot" ]; then
-  # this run's own container, not a fixed name: several forks can be running
+  # this run's own container, not a fixed name: several runs can be up
   container=devnet-run-$(basename "$rundir" | sed 's/^run-//')
   slot=$(docker logs "$container" 2>&1 | sed 's/\x1b\[[0-9;]*m//g' \
          | grep -a 'Chain extended' | tail -1 | grep -oE 'at slot [0-9]+' | grep -oE '[0-9]+')

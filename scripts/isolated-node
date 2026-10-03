@@ -10,15 +10,15 @@
 #   isolated-node stop [<run>]
 #   isolated-node logs [<run>] [-f]
 #   isolated-node cli [--run <run>] <cardano-cli args...>
-#   isolated-node status [<run>]     # fork containers and their runs
+#   isolated-node status [<run>]     # run containers and their run dirs
 #   isolated-node rm <run>           # delete a run dir and its stopped containers
 #
 # <run> is a run name as given to new-run (mark-test, or run-mark-test,
 # means $RUNS_DIR/run-mark-test), or a path to a run dir if it contains a slash.
 #
-# Several forks can run at once. Each run directory gets its own container,
+# Several runs can be up at once. Each run directory gets its own container,
 # named devnet-run-<run suffix>, in its own compose project. stop, logs and cli
-# take an optional <run>; if exactly one fork is running they default to it,
+# take an optional <run>; if exactly one run is up they default to it,
 # and otherwise they list what is running and stop.
 #
 # The run directory is a copy of the golden DB plus an isolated config; never
@@ -42,7 +42,7 @@ RUNS=${RUNS_DIR:-/mnt/cardano/runs}
 # existing dir -> absolute path (GNU realpath -e, but portable to BSD/macOS)
 abs_dir() { (cd "$1" 2>/dev/null && pwd) || { echo "no such run dir: $1" >&2; return 1; } }
 
-# <run> -> existing run dir, accepting what devnet-fork's resolve_run does
+# <run> -> existing run dir, accepting the same forms adafork's devnet-fork does
 run_dir() {
   case $1 in
     */*)   abs_dir "$1" ;;
@@ -54,8 +54,8 @@ run_dir() {
 # run dir -> container name. One mapping, used by every script that needs it.
 container_for() { local b; b=$(basename "${1%/}"); echo "devnet-run-${b#run-}"; }
 
-# Which forks are up, by label rather than by name pattern.
-running_forks() { docker ps --filter 'label=devnet.run=producer' --format '{{.Names}}'; }
+# Which runs are up, by label rather than by name pattern.
+running_producers() { docker ps --filter 'label=devnet.run=producer' --format '{{.Names}}'; }
 
 # The run directory a running container was started against.
 rundir_of() {
@@ -63,14 +63,14 @@ rundir_of() {
     '{{range .Mounts}}{{if eq .Destination "/rundir"}}{{.Source}}{{end}}{{end}}' 2>/dev/null
 }
 
-# Resolve which fork a non-start subcommand means.
+# Resolve which run a non-start subcommand means.
 resolve_container() {
   if [ -n "${1:-}" ]; then container_for "$1"; return; fi
-  local names; names=$(running_forks)
+  local names; names=$(running_producers)
   case "$(echo "$names" | grep -c .)" in
     1) echo "$names" ;;
-    0) echo "no fork is running" >&2; return 1 ;;
-    *) echo "several forks are running; name one:" >&2
+    0) echo "no run is up" >&2; return 1 ;;
+    *) echo "several runs are up; name one:" >&2
        echo "$names" | sed 's/^/  /' >&2; return 1 ;;
   esac
 }
@@ -92,7 +92,7 @@ case "$cmd" in
     done
     export ISOLATED_RUN_DIR=$rundir
     export ISOLATED_CONTAINER_NAME=$(container_for "$rundir")
-    # a distinct compose project per fork, or compose would treat a second fork
+    # a distinct compose project per run, or compose would treat a second run
     # as a replacement for the first rather than an addition
     COMPOSE="docker compose -p $ISOLATED_CONTAINER_NAME -f $DEVNET_ROOT/docker-compose.yml --profile isolated"
     echo "container: $ISOLATED_CONTAINER_NAME"
@@ -126,7 +126,7 @@ case "$cmd" in
   stop)
     # image STOPSIGNAL is SIGINT, so this is a clean shutdown. The container is
     # deliberately NOT removed: docker logs still works afterwards, which is
-    # what you want after a failed fork run.
+    # what you want after a failed run.
     name=$(resolve_container "${1:-}") || exit 1
     sock=$(docker inspect "$name" \
              --format '{{range .Mounts}}{{if eq .Destination "/ipc"}}{{.Source}}{{end}}{{end}}' \
@@ -137,7 +137,7 @@ case "$cmd" in
     [ -S "$sock" ] && rm -f "$sock" && echo "removed stale socket $sock"
     ;;
   logs)
-    # a leading run dir or fork name selects which; anything else goes to docker
+    # a leading run dir or run name selects which; anything else goes to docker
     case "${1:-}" in
       -*|"") name=$(resolve_container "") || exit 1 ;;
       *) name=$(container_for "$1"); shift ;;
@@ -160,7 +160,7 @@ case "$cmd" in
       "$@"
     ;;
   status)
-    # every fork container (producer, follower, ogmios), found by label; with a
+    # every run container (producer, follower, ogmios), found by label; with a
     # <run>, only that run's, plus its socket and gates
     rundir=""
     filter=(--filter label=devnet.run)
@@ -171,7 +171,7 @@ case "$cmd" in
     rows=$(docker ps -a "${filter[@]}" --format \
       '{{.Label "devnet.run.dir"}}|{{.Label "devnet.run"}}|{{.Names}}|{{.State}}|{{.Status}}')
     if [ -z "$rows" ]; then
-      echo "no fork containers${rundir:+ for $rundir}"
+      echo "no run containers${rundir:+ for $rundir}"
     else
       runs=$( (cd "$RUNS" 2>/dev/null && pwd) || echo "$RUNS")
       # header as a first row rather than column -N, which macOS column lacks

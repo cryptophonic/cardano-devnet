@@ -10,9 +10,9 @@
 #   follower-node logs <run dir> [-f]
 #   follower-node cli <run dir> <cardano-cli args...>  # against the FOLLOWER's socket
 #
-# Container names derive from the run directories, so several fork pairs can run
+# Container names derive from the run directories, so several run pairs can run
 # at once. --of defaults to the follower's run dir with a trailing "-follower"
-# removed, which is what `devnet fork follow` creates.
+# removed, which is what adafork's `devnet-fork follow` creates.
 #
 # Isolation is unchanged. The follower joins the FORGER'S OWN network
 # namespace (--network container:...), the same way `isolated-node cli` does, so
@@ -30,9 +30,9 @@
 #
 # The fix is not a lead. Put the run's clock in stamp-file mode
 # (set-faketime --stamp) and set it AFTER the follower is up, from the forger's
-# actual clock plus a margin; `devnet fork follow` does this. A stamp write
+# actual clock plus a margin; adafork's `devnet-fork follow` does this. A stamp write
 # re-anchors at the read, so the value to write is "the clock is X now", not an
-# offset. See test/fixtures/fork-mode-clock-signal.md 10e.
+# offset. See adafork's server/test/fixtures/fork-mode-clock-signal.md 10e.
 
 set -euo pipefail
 
