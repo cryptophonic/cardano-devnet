@@ -87,8 +87,8 @@ services:
     # Discovery is by label, not by name pattern: tooling asks docker which forks
     # are running rather than guessing from strings.
     labels:
-      devnet.fork: producer
-      devnet.fork.run: ${ISOLATED_RUN_DIR:-}
+      devnet.run: producer
+      devnet.run.dir: ${ISOLATED_RUN_DIR:-}
     user: $MY_UID:$MY_GID
     entrypoint: /usr/local/bin/cardano-node
     network_mode: none
@@ -150,8 +150,8 @@ services:
     # Discovery is by label, as with the producer: tooling asks docker which
     # sidecars are up rather than guessing from names.
     labels:
-      devnet.fork: ogmios
-      devnet.fork.run: ${ISOLATED_RUN_DIR:-}
+      devnet.run: ogmios
+      devnet.run.dir: ${ISOLATED_RUN_DIR:-}
     user: $MY_UID:$MY_GID
     entrypoint: /bin/ogmios
     restart: on-failure

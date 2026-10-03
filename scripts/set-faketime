@@ -84,7 +84,7 @@ done
 
 if [ -z "$slot" ]; then
   # this run's own container, not a fixed name: several forks can be running
-  container=devnet-fork-$(basename "$rundir" | sed 's/^run-//')
+  container=devnet-run-$(basename "$rundir" | sed 's/^run-//')
   slot=$(docker logs "$container" 2>&1 | sed 's/\x1b\[[0-9;]*m//g' \
          | grep -a 'Chain extended' | tail -1 | grep -oE 'at slot [0-9]+' | grep -oE '[0-9]+')
   [ -n "$slot" ] || {

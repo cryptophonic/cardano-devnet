@@ -17,7 +17,7 @@
 # means $RUNS_DIR/run-mark-test), or a path to a run dir if it contains a slash.
 #
 # Several forks can run at once. Each run directory gets its own container,
-# named devnet-fork-<run suffix>, in its own compose project. stop, logs and cli
+# named devnet-run-<run suffix>, in its own compose project. stop, logs and cli
 # take an optional <run>; if exactly one fork is running they default to it,
 # and otherwise they list what is running and stop.
 #
@@ -52,10 +52,10 @@ run_dir() {
 }
 
 # run dir -> container name. One mapping, used by every script that needs it.
-container_for() { local b; b=$(basename "${1%/}"); echo "devnet-fork-${b#run-}"; }
+container_for() { local b; b=$(basename "${1%/}"); echo "devnet-run-${b#run-}"; }
 
 # Which forks are up, by label rather than by name pattern.
-running_forks() { docker ps --filter 'label=devnet.fork=producer' --format '{{.Names}}'; }
+running_forks() { docker ps --filter 'label=devnet.run=producer' --format '{{.Names}}'; }
 
 # The run directory a running container was started against.
 rundir_of() {
@@ -163,13 +163,13 @@ case "$cmd" in
     # every fork container (producer, follower, ogmios), found by label; with a
     # <run>, only that run's, plus its socket and gates
     rundir=""
-    filter=(--filter label=devnet.fork)
+    filter=(--filter label=devnet.run)
     if [ -n "${1:-}" ]; then
       rundir=$(run_dir "$1")
-      filter=(--filter "label=devnet.fork.run=$rundir")
+      filter=(--filter "label=devnet.run.dir=$rundir")
     fi
     rows=$(docker ps -a "${filter[@]}" --format \
-      '{{.Label "devnet.fork.run"}}|{{.Label "devnet.fork"}}|{{.Names}}|{{.State}}|{{.Status}}')
+      '{{.Label "devnet.run.dir"}}|{{.Label "devnet.run"}}|{{.Names}}|{{.State}}|{{.Status}}')
     if [ -z "$rows" ]; then
       echo "no fork containers${rundir:+ for $rundir}"
     else
@@ -206,14 +206,14 @@ case "$cmd" in
       exit 1
     fi
     # producer, follower and ogmios containers all carry the run as a label
-    up=$(docker ps --filter "label=devnet.fork.run=$rundir" --format '{{.Names}}')
+    up=$(docker ps --filter "label=devnet.run.dir=$rundir" --format '{{.Names}}')
     if [ -n "$up" ]; then
       echo "refusing: $rundir is in use by running containers; stop them first:" >&2
       echo "$up" | sed 's/^/  /' >&2
       exit 1
     fi
     # the kept containers' logs belong to this run; they go with it
-    docker ps -a --filter "label=devnet.fork.run=$rundir" --format '{{.ID}} {{.Names}}' |
+    docker ps -a --filter "label=devnet.run.dir=$rundir" --format '{{.ID}} {{.Names}}' |
       while read -r id cname; do
         docker rm "$id" >/dev/null && echo "removed container $cname"
       done
