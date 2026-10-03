@@ -8,6 +8,7 @@
   "AlonzoGenesisHash": "",
   "ConwayGenesisFile": "genesis-conway.json",
   "ConwayGenesisHash": "",
+  "DijkstraGenesisFile": "genesis-dijkstra.json",
   "ApplicationName": "cardano-sl",
   "ApplicationVersion": 1,
   "MaxKnownMajorProtocolVersion": 2,
@@ -92,5 +93,15 @@
     }
   },
   "ExperimentalHardForksEnabled": true,
-  "ExperimentalProtocolsEnabled": true
+  "ExperimentalProtocolsEnabled": true,
+  "UseTraceDispatcher": true,
+  "TraceOptions": {
+    "": {
+      "severity": "Notice",
+      "detail": "DNormal",
+      "backends": [
+        "Stdout HumanFormatColoured"
+      ]
+    }
+  }
 }

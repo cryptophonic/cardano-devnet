@@ -46,7 +46,8 @@ faucet_addr=$(cat $CARDANO_CLI_GURU/assets/addr/faucet.addr)
 echo -n faucet > $CARDANO_CLI_GURU/assets/alias/$faucet_addr.alias
 
 # Update start time params
-echo '{"Producers": []}' > "$TARGETDIR/topology.json"
+# P2P topology format (the pre-P2P {"Producers": []} form is rejected by 11.1.3+)
+echo '{"bootstrapPeers": null, "localRoots": [], "publicRoots": [], "useLedgerAfterSlot": -1}' > "$TARGETDIR/topology.json"
 sedi "s/\"startTime\": [0-9]*/\"startTime\": $(date +%s)/" "$TARGETDIR/genesis-byron.json" && \
 sedi "s/\"systemStart\": \".*\"/\"systemStart\": \"$(date -u +%FT%TZ)\"/" "$TARGETDIR/genesis-shelley.json"
 
