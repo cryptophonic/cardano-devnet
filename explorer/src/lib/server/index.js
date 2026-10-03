@@ -1,7 +1,11 @@
-import fs from 'fs'
+// Read side of the explorer, over the in-memory ogmios-fed index (chain.js).
+// Exports and shapes are unchanged from the stored-JSON era so the routes
+// didn't have to move; only the data source did.
 
-const DB=process.env.DEVNET_ROOT + "/runtime/index"
-const GURU_ASSETS=process.env.CARDANO_CLI_GURU + "/assets"
+import fs from 'fs'
+import { chainStore, PAGE_LENGTH } from './chain.js'
+
+const GURU_ASSETS = process.env.CARDANO_CLI_GURU + "/assets"
 
 const logo_lookup = [
   "cardano-ada-logo.svg",
@@ -22,27 +26,31 @@ function small_addr(addr) {
   return addr.slice(0, 15) + ".." + addr.slice(-6)
 }
 
-function addr_alias(addr) {
-  const aliasFile = DB + "/addresses/" + addr + "/alias"
-  let alias
-  try {
-    alias = fs.readFileSync(aliasFile).toString().trim()
-  } catch (notFound) {
-  }
-  return alias
-}
-
 function formatADA(lovelace) {
   let ada = ("" + lovelace).slice(0,-6)
   if (ada === "") ada = "0"
   return ada + "." + ("000000" + lovelace).slice(-6)
 }
 
+function flattenValue(value) {
+  return Object.keys(value).reduce((acc, kpolicy) => {
+    Object.keys(value[kpolicy]).map(ktoken => {
+      acc[kpolicy + ":" + ktoken] = value[kpolicy][ktoken]
+    })
+    return acc
+  }, {})
+}
+
 export function loadBlock(path) {
-  const block = JSON.parse(fs.readFileSync(DB + path))
-  const latest = JSON.parse(fs.readFileSync(DB + "/latest"))
+  const store = chainStore()
+  // "/blocks/<id>/block" or "/chain/<height>/block", as the routes always
+  // passed; height resolves through the by-height map
+  const part = path.split("/")
+  const id = part[1] === "chain" ? store.byHeight.get(parseInt(part[2])) : part[2]
+  const block = store.blocks.get(id)
+  if (block === undefined) throw new Error("no such block: " + path)
   const txs = block.transactions.map(t => {
-    const tobj = JSON.parse(fs.readFileSync(DB + "/transactions/" + t + "/tx"))
+    const tobj = store.txs.get(t)
     return {
       hash: [t, small_hash(t)],
       inputCount: tobj.inputs.length,
@@ -54,33 +62,25 @@ export function loadBlock(path) {
     height: block.height,
     page: block.page,
     slot: block.slot,
-    latest: latest.height,
+    latest: store.latest.height,
     txs: txs
   }
 }
 
 export function loadLatest() {
-  // Local devnet mode may never have run on this host at all -- a fork-only
-  // session has no reason to have started it -- and this load() runs for
-  // every route via +layout.server.js, including the fork-mode pages below,
-  // which don't touch the indexer. Degrade to an empty devnet rather than
-  // taking the whole app down for routes that don't need this.
-  if (!fs.existsSync(DB + "/latest")) return { height: 0, tokens: {} }
-  const latest = JSON.parse(fs.readFileSync(DB + "/latest"))
-  const tokens = JSON.parse(fs.readFileSync(DB + "/tokens/ledger"))
-  //console.log("Loading latest: " + latest.height)
-  latest.tokens = Object.keys(tokens).reduce((acc, kpolicy) => {
-    Object.keys(tokens[kpolicy]).map(ktoken => {
-      let logo
-      let amount
-      logo = logo_lookup[tokens[kpolicy][ktoken].index]
-      if (kpolicy === "ada" && ktoken == "lovelace") {
-        amount = formatADA(tokens[kpolicy][ktoken].amount)
-      } else {
-        amount = tokens[kpolicy][ktoken].amount
-      }
+  const store = chainStore()
+  // The node (or its ogmios) may not be up yet, or no block is forged yet;
+  // degrade to an empty devnet rather than taking down every route that
+  // loads this through +layout.server.js.
+  if (store.latest === null) return { height: 0, tokens: {} }
+  const latest = { ...store.latest }
+  latest.tokens = Object.keys(store.tokenMeta).reduce((acc, kpolicy) => {
+    Object.keys(store.tokenMeta[kpolicy]).map(ktoken => {
+      const meta = store.tokenMeta[kpolicy][ktoken]
+      const amount = kpolicy === "ada" && ktoken === "lovelace"
+        ? formatADA(meta.amount) : meta.amount
       acc[small_hash(kpolicy) + ":" + ktoken] = {
-        logo: logo,
+        logo: logo_lookup[meta.index],
         amount: amount,
         policy: kpolicy,
         token: ktoken
@@ -92,63 +92,46 @@ export function loadLatest() {
 }
 
 export async function waitBlock() {
+  const store = chainStore()
   return await new Promise(resolve => {
-    const listener = () => {
-      resolve(loadLatest())
-      fs.unwatchFile(DB + "/latest", listener)
-    }
-    fs.watchFile(DB + "/latest", { interval: 507 }, listener)
+    store.once('block', () => resolve(loadLatest()))
   })
 }
 
 export function loadTransaction(hash) {
-  const tx = JSON.parse(fs.readFileSync(DB + "/transactions/" + hash + "/tx"))
-  try {
-    tx.hash = [tx.id, small_hash(tx.id)]
-    const block = JSON.parse(fs.readFileSync(DB + "/transactions/" + hash + "/block"))
-    tx.block = [block.id, small_hash(block.id)]
-    tx.blockHeight = block.height
-  } catch (noSuchFile) {
+  const store = chainStore()
+  const dbTx = store.txs.get(hash)
+  if (dbTx === undefined) throw new Error("no such transaction: " + hash)
+  const tx = { ...dbTx }
+  tx.hash = [tx.id, small_hash(tx.id)]
+  if (tx.blockId !== undefined) {
+    tx.block = [tx.blockId, small_hash(tx.blockId)]
+    tx.blockHeight = store.blocks.get(tx.blockId).height
+  } else {
     tx.block = ["genesis", "genesis"]
     tx.blockHeight = 0
   }
-  if (tx.inputs !== undefined) {
-    tx.inputs = tx.inputs.map(input => {
-      const [ intx, index ] = input.split("#")
-      const intxfile = DB + "/transactions/" + intx + "/outputs/" + index + "/output"
-      const val = JSON.parse(fs.readFileSync(intxfile))
-      const obj = {
-        hash: [intx, small_hash(intx)],
-        ref: index,
-        addr: [val.address, small_addr(val.address)],
-        alias: addr_alias(val.address),
-        value: Object.keys(val.value).reduce((acc, kpolicy) => {
-          Object.keys(val.value[kpolicy]).map(ktoken => {
-            acc[kpolicy + ":" + ktoken] = val.value[kpolicy][ktoken]
-          })
-          return acc
-        }, {})
-      }
-      obj.tokenCount = Object.keys(obj.value).length - 1
-      obj.value["ada"] = formatADA(obj.value["ada:lovelace"])
-      return obj
-    })
-  } else {
-    tx.inputs = []
-  }
+  tx.inputs = tx.inputs.map(input => {
+    const [ intx, index ] = input.split("#")
+    const val = store.outputs.get(input)
+    const obj = {
+      hash: [intx, small_hash(intx)],
+      ref: index,
+      addr: [val.address, small_addr(val.address)],
+      alias: store.alias(val.address),
+      value: flattenValue(val.value)
+    }
+    obj.tokenCount = Object.keys(obj.value).length - 1
+    obj.value["ada"] = formatADA(obj.value["ada:lovelace"])
+    return obj
+  })
   tx.outputs = tx.outputs.map((output, index) => {
-    const outtxfile = DB + "/transactions/" + tx.id + "/outputs/" + index + "/output"
-    const val = JSON.parse(fs.readFileSync(outtxfile))
+    const val = store.outputs.get(tx.id + "#" + index)
     const obj = {
       addr: [output, small_addr(output)],
-      alias: addr_alias(output),
+      alias: store.alias(output),
       ref: index,
-      value: Object.keys(val.value).reduce((acc, kpolicy) => {
-        Object.keys(val.value[kpolicy]).map(ktoken => {
-          acc[kpolicy + ":" + ktoken] = val.value[kpolicy][ktoken]
-        })
-        return acc
-      }, {}),
+      value: flattenValue(val.value),
       spentBy: val.spentBy === undefined ? "unspent" : [val.spentBy, small_hash(val.spentBy)]
     }
     obj.tokenCount = Object.keys(obj.value).length - 1
@@ -162,23 +145,23 @@ export function loadTransaction(hash) {
 }
 
 export function loadUtxo(hash, ref) {
-  const txData = JSON.parse(fs.readFileSync(DB + "/transactions/" + hash + "/tx"))
-  const utxoData = JSON.parse(fs.readFileSync(DB + "/transactions/" + hash + "/outputs/" + ref + "/output"))
-  const metadata = JSON.parse(fs.readFileSync(DB + "/tokens/ledger"))
+  const store = chainStore()
+  const txData = store.txs.get(hash)
+  const utxoData = store.outputs.get(hash + "#" + ref)
+  if (txData === undefined || utxoData === undefined) throw new Error("no such utxo: " + hash + "#" + ref)
   const utxo = {
     hash: [hash, small_hash(hash)],
     ref: ref,
     addr: [utxoData.address, small_addr(utxoData.address)],
-    alias: addr_alias(utxoData.address),
+    alias: store.alias(utxoData.address),
     datum: utxoData.datum,
     redeemer: utxoData.redeemer,
     value: Object.keys(utxoData.value).reduce((acc, kpolicy) => {
       Object.keys(utxoData.value[kpolicy]).map(ktoken => {
-        const logo = logo_lookup[metadata[kpolicy][ktoken].index]
         acc[kpolicy + ":" + ktoken] = {
           policy: [kpolicy, small_hash(kpolicy)],
           token: ktoken,
-          logo: logo,
+          logo: logo_lookup[store.tokenMeta[kpolicy][ktoken].index],
           amount: utxoData.value[kpolicy][ktoken]
         }
       })
@@ -198,43 +181,30 @@ export function loadUtxo(hash, ref) {
 }
 
 export function loadAddress(addr) {
-  const alias = addr_alias(addr)
-  let ledgerValues = []
-  try {
-    ledgerValues = JSON.parse(fs.readFileSync(DB + "/addresses/" + addr + "/ledger"))
-  } catch (fileNotFound) {}
-  const metadata = JSON.parse(fs.readFileSync(DB + "/tokens/ledger"))
-  const ledger = Object.keys(ledgerValues).reduce((acc, kpolicy) => {
-    Object.keys(ledgerValues[kpolicy]).map(ktoken => {
-      const logo = logo_lookup[metadata[kpolicy][ktoken].index]
+  const store = chainStore()
+  const entry = store.addresses.get(addr) ?? { ledger: {}, history: [], unspent: [] }
+  const ledger = Object.keys(entry.ledger).reduce((acc, kpolicy) => {
+    Object.keys(entry.ledger[kpolicy]).map(ktoken => {
       acc[kpolicy + ":" + ktoken] = {
         policy: [kpolicy, small_hash(kpolicy)],
         token: ktoken,
-        logo: logo,
-        amount: ledgerValues[kpolicy][ktoken]
+        logo: logo_lookup[store.tokenMeta[kpolicy][ktoken].index],
+        amount: entry.ledger[kpolicy][ktoken]
       }
     })
     return acc
   }, {})
-  let history = []
-  try {
-    history = JSON.parse(fs.readFileSync(DB + "/addresses/" + addr + "/history"))
-  } catch (fileNotFound) {} 
-  let unspent = []
-  try {
-    unspent = JSON.parse(fs.readFileSync(DB + "/addresses/" + addr + "/unspent"))
-  } catch (fileNotFound) {}
   const obj = {
     address: [addr, small_addr(addr)],
-    alias: alias,
+    alias: store.alias(addr),
     ledger: ledger,
-    history: history.map(h => {
+    history: entry.history.map(h => {
       return {
         block: h.block,
         id: [h.id, small_hash(h.id)]
       }
     }),
-    unspent: unspent.map(u => {
+    unspent: entry.unspent.map(u => {
       const sp = u.split("#")
       return {
         id: [sp[0], small_hash(sp[0])],
@@ -253,64 +223,48 @@ export function loadAddress(addr) {
 }
 
 export function loadToken(policy, token) {
-  const tokData = JSON.parse(fs.readFileSync(DB + "/tokens/" + policy + "/" + token + "/ledger"))
-  const metadata = JSON.parse(fs.readFileSync(DB + "/tokens/ledger"))
+  const store = chainStore()
+  const tokData = store.tokenLedgers.get(policy + ":" + token) ?? {}
   let count = 0
   const pagedData = Object.keys(tokData).reduce((acc, addr) => {
     let amt = tokData[addr]
     if (policy === "ada" && token === "lovelace") amt = formatADA(amt)
     if (count < 10) {
-      const alias = addr_alias(addr)
       acc.push({
         address: [addr, small_addr(addr)],
         amount: amt,
-        alias: alias
+        alias: store.alias(addr)
       })
       count++
     }
     return acc
   }, [])
   return {
-    logo: logo_lookup[metadata[policy][token].index],
+    logo: logo_lookup[store.tokenMeta[policy][token].index],
     policy: policy,
     token: token,
     ledger: pagedData
   }
 }
 
-const testPath = async path => {
-  return new Promise(res => {
-    try {
-      fs.statSync(path)
-      res(true)
-    } catch (fileNotFoundErr) {
-      res(false)
-    }
-  })
-}
-
 export async function search(pattern) {
+  const store = chainStore()
   if (pattern.includes("#")) {
     const utxoSplit = pattern.split("#")
-    if (utxoSplit.length === 2 && await testPath(DB + "/transactions/" + utxoSplit[0] + "/outputs/" + utxoSplit[1])) {
-      console.log("found utxo")
+    if (utxoSplit.length === 2 && store.outputs.has(pattern)) {
       return "/utxo/" + utxoSplit.join("/")
     }
   } else {
-    if (await testPath(DB + "/blocks/" + pattern)) {
-      console.log("found block")
+    if (store.blocks.has(pattern)) {
       return "/block/" + pattern
     }
-    if (await testPath(DB + "/transactions/" + pattern)) {
-      console.log("found transaction")
+    if (store.txs.has(pattern)) {
       return "/transaction/" + pattern
     }
-    if (await testPath(DB + "/addresses/" + pattern)) {
-      console.log("found address")
+    if (store.addresses.has(pattern)) {
       return "/address/" + pattern
     }
-    if (await testPath(DB + "/chain/" + pattern)) {
-      console.log("found height")
+    if (/^[0-9]+$/.test(pattern) && store.byHeight.has(parseInt(pattern))) {
       return "/chain/" + pattern
     }
   }
@@ -319,7 +273,7 @@ export async function search(pattern) {
 
 export function renameAlias(addr, from, to) {
   try {
-    fs.writeFileSync(DB + "/addresses/" + addr + "/alias", to)
+    chainStore().aliases.set(addr, to)
     fs.renameSync(GURU_ASSETS + "/addr/" + from + ".addr", GURU_ASSETS + "/addr/" + to + ".addr")
     fs.renameSync(GURU_ASSETS + "/keys/" + from + ".skey", GURU_ASSETS + "/keys/" + to + ".skey")
     fs.renameSync(GURU_ASSETS + "/keys/" + from + ".vkey", GURU_ASSETS + "/keys/" + to + ".vkey")
@@ -328,37 +282,48 @@ export function renameAlias(addr, from, to) {
 }
 
 export function loadBlocksPage(page) {
-  const pg = JSON.parse(fs.readFileSync(DB + "/pages/blocks/" + page))
-  const last = JSON.parse(fs.readFileSync(DB + "/pages/blocks/last"))
-  const newObj = {
-    pageIndex: parseInt(page),
-    lastPage: parseInt(last),
-    pageData: pg.map(p => {
-      return {
-        height: p.height,
-        id: small_hash(p.id),
-        txCount: p.txCount
-      }
+  const store = chainStore()
+  const pageIndex = parseInt(page)
+  const lastPage = store.latest === null ? 0 : store.latest.page
+  const pageData = []
+  for (let h = pageIndex * PAGE_LENGTH; h < (pageIndex + 1) * PAGE_LENGTH; h++) {
+    const id = store.byHeight.get(h)
+    if (id === undefined) break
+    const block = store.blocks.get(id)
+    pageData.push({
+      height: block.height,
+      id: small_hash(block.id),
+      txCount: block.transactions.length
     })
   }
-  return newObj
+  return {
+    pageIndex: pageIndex,
+    lastPage: lastPage,
+    pageData: pageData
+  }
 }
 
 export function loadTransactionsPage(page) {
-  const pg = JSON.parse(fs.readFileSync(DB + "/pages/transactions/" + page))
-  const last = JSON.parse(fs.readFileSync(DB + "/pages/transactions/last"))
-  const newObj = {
-    pageIndex: parseInt(page),
-    lastPage: parseInt(last),
-    pageData: pg.list.map(p => {
+  const store = chainStore()
+  const pageIndex = parseInt(page)
+  const lastPage = Math.floor((store.txOrder.length - 1) / PAGE_LENGTH)
+  const pageData = store.txOrder
+    .slice(pageIndex * PAGE_LENGTH, (pageIndex + 1) * PAGE_LENGTH)
+    .map(id => {
+      const tx = store.txs.get(id)
+      const spent = tx.outputs.map((o, i) => store.outputs.get(id + "#" + i).spentBy !== undefined)
+      const unspentCount = spent.filter(s => !s).length
       return {
-        index: pg.ids[p].index,
-        id: [p, small_hash(p)],
-        unspentCount: pg.ids[p].unspentCount,
-        spentCount: pg.ids[p].spent.length - pg.ids[p].unspentCount,
-        utxos: pg.ids[p].spent
+        index: tx.index,
+        id: [id, small_hash(id)],
+        unspentCount: unspentCount,
+        spentCount: spent.length - unspentCount,
+        utxos: spent
       }
     })
+  return {
+    pageIndex: pageIndex,
+    lastPage: lastPage,
+    pageData: pageData
   }
-  return newObj
 }
