@@ -8,13 +8,6 @@ networks:
     name: devnet-forks
     external: true
 
-  hydranet:
-    driver: bridge
-    ipam:
-      config:
-        - subnet: 172.16.0.0/24
-          gateway: 172.16.0.1
-
 services:
   #shell:
     #image: cardanosolutions/cardano-node-ogmios:latest
@@ -194,36 +187,4 @@ services:
     ports:
       - ${OGMIOS_PORT:-1337}:1337
 
-  hydra-node:
-    image: ghcr.io/cardano-scaling/hydra-node:latest
-    user: $MY_UID:$MY_GID
-    volumes:
-      - ${PWD}:/work
-      - ${DEVNET_ROOT}/runtime:/runtime
-      - ${DEVNET_ROOT}/hydra:/hydra
-      - ${CARDANO_CLI_GURU}/assets:/assets
-    networks:
-      hydranet:
-        ipv4_address: ${HYDRA_IP}
-    working_dir: /work
-    environment:
-      - CARDANO_NODE_SOCKET_PATH=/runtime/ipc/node.socket
-      - CARDANO_NODE_NETWORK_ID=42
-
-  hydra-tui:
-    image: ghcr.io/cardano-scaling/hydra-tui:latest
-    user: $MY_UID:$MY_GID
-    stdin_open: true
-    tty: true
-    volumes:
-      - ${PWD}:/work
-      - ${DEVNET_ROOT}/runtime:/runtime
-      - ${DEVNET_ROOT}/hydra:/hydra
-      - ${CARDANO_ASSETS_PATH}:/assets
-    networks:
-      - hydranet
-    working_dir: /work
-    environment:
-      - CARDANO_NODE_SOCKET_PATH=/runtime/ipc/node.socket
-      - CARDANO_NODE_NETWORK_ID=42
 

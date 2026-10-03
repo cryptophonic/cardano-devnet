@@ -70,7 +70,6 @@ Conventions that matter:
 - `config/` — genesis, credentials and node config for the local devnet.
 - `docker-compose.yml` — service definitions (the image itself is built and
   published from the separate `fork-mode` repo).
-- `hydra/` — optional local hydra head, see its own README.
 - `cardano-cli-guru/` — submodule providing the address-alias tooling.
 
 ## Housekeeping
