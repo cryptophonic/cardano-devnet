@@ -1,4 +1,5 @@
 <script>
+  import { formatTime } from '$lib/time.js'
   let { addr } = $props()
   let changeAlias = $state({
     newValue: addr.alias,
@@ -91,6 +92,7 @@
               <tr>
                 <th>Block</th>
                 <th>Transaction</th>
+                <th>Time</th>
               </tr>
             </thead>
             <tbody>
@@ -102,6 +104,7 @@
                   <td class="text-center">
                     <a class="btn color-transaction shadow-xl" href="/transaction/{tx.id[0]}">Tx {tx.id[1]}</a>
                   </td>
+                  <td class="text-center whitespace-nowrap">{formatTime(tx.time)}</td>
                 </tr>
               {/each}
             </tbody>

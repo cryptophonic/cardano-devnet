@@ -204,12 +204,16 @@ export function loadAddress(addr) {
     address: [addr, small_addr(addr)],
     alias: store.alias(addr),
     ledger: ledger,
+    // Newest first: an address with a long history is being read to find out
+    // what just happened to it, not what happened to it first.
     history: entry.history.map(h => {
+      const blockId = store.byHeight.get(h.block)
       return {
         block: h.block,
-        id: [h.id, small_hash(h.id)]
+        id: [h.id, small_hash(h.id)],
+        time: blockId === undefined ? null : store.slotTime(store.blocks.get(blockId).slot)
       }
-    }),
+    }).reverse(),
     unspent: entry.unspent.map(u => {
       const sp = u.split("#")
       return {
