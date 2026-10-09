@@ -4,9 +4,12 @@
 
 import fs from 'fs'
 import { chainStore, PAGE_LENGTH } from './chain.js'
+import { tokenLogo, formatAmount } from './tokens.js'
 
 const GURU_ASSETS = process.env.CARDANO_CLI_GURU + "/assets"
 
+// Placeholder glyphs, picked by the order the indexer first saw each token.
+// tokens.js overrides these per token where a chain has said what it wants.
 const logo_lookup = [
   "cardano-ada-logo.svg",
   "svg/bolt.svg",
@@ -27,15 +30,16 @@ function small_addr(addr) {
 }
 
 function formatADA(lovelace) {
-  let ada = ("" + lovelace).slice(0,-6)
-  if (ada === "") ada = "0"
-  return ada + "." + ("000000" + lovelace).slice(-6)
+  return formatAmount(lovelace, "ada", "lovelace")
 }
 
 function flattenValue(value) {
   return Object.keys(value).reduce((acc, kpolicy) => {
     Object.keys(value[kpolicy]).map(ktoken => {
-      acc[kpolicy + ":" + ktoken] = value[kpolicy][ktoken]
+      // ada keeps its lovelace figure here; the caller formats it as obj.value.ada
+      acc[kpolicy + ":" + ktoken] = kpolicy === "ada"
+        ? value[kpolicy][ktoken]
+        : formatAmount(value[kpolicy][ktoken], kpolicy, ktoken)
     })
     return acc
   }, {})
@@ -77,10 +81,9 @@ export function loadLatest() {
   latest.tokens = Object.keys(store.tokenMeta).reduce((acc, kpolicy) => {
     Object.keys(store.tokenMeta[kpolicy]).map(ktoken => {
       const meta = store.tokenMeta[kpolicy][ktoken]
-      const amount = kpolicy === "ada" && ktoken === "lovelace"
-        ? formatADA(meta.amount) : meta.amount
+      const amount = formatAmount(meta.amount, kpolicy, ktoken)
       acc[small_hash(kpolicy) + ":" + ktoken] = {
-        logo: logo_lookup[meta.index],
+        logo: tokenLogo(kpolicy, ktoken, logo_lookup[meta.index]),
         amount: amount,
         policy: kpolicy,
         token: ktoken
@@ -161,8 +164,8 @@ export function loadUtxo(hash, ref) {
         acc[kpolicy + ":" + ktoken] = {
           policy: [kpolicy, small_hash(kpolicy)],
           token: ktoken,
-          logo: logo_lookup[store.tokenMeta[kpolicy][ktoken].index],
-          amount: utxoData.value[kpolicy][ktoken]
+          logo: tokenLogo(kpolicy, ktoken, logo_lookup[store.tokenMeta[kpolicy][ktoken].index]),
+          amount: formatAmount(utxoData.value[kpolicy][ktoken], kpolicy, ktoken)
         }
       })
       return acc
@@ -188,8 +191,8 @@ export function loadAddress(addr) {
       acc[kpolicy + ":" + ktoken] = {
         policy: [kpolicy, small_hash(kpolicy)],
         token: ktoken,
-        logo: logo_lookup[store.tokenMeta[kpolicy][ktoken].index],
-        amount: entry.ledger[kpolicy][ktoken]
+        logo: tokenLogo(kpolicy, ktoken, logo_lookup[store.tokenMeta[kpolicy][ktoken].index]),
+        amount: formatAmount(entry.ledger[kpolicy][ktoken], kpolicy, ktoken)
       }
     })
     return acc
@@ -225,10 +228,13 @@ export function loadAddress(addr) {
 export function loadToken(policy, token) {
   const store = chainStore()
   const tokData = store.tokenLedgers.get(policy + ":" + token) ?? {}
+  // policy/token come straight off the URL, and a token the indexer has never
+  // seen has no meta -- and so no placeholder-glyph index either.
+  const meta = store.tokenMeta[policy]?.[token]
   let count = 0
   const pagedData = Object.keys(tokData).reduce((acc, addr) => {
     let amt = tokData[addr]
-    if (policy === "ada" && token === "lovelace") amt = formatADA(amt)
+    amt = formatAmount(amt, policy, token)
     if (count < 10) {
       acc.push({
         address: [addr, small_addr(addr)],
@@ -240,7 +246,7 @@ export function loadToken(policy, token) {
     return acc
   }, [])
   return {
-    logo: logo_lookup[store.tokenMeta[policy][token].index],
+    logo: tokenLogo(policy, token, logo_lookup[(meta?.index ?? 0) % logo_lookup.length]),
     policy: policy,
     token: token,
     ledger: pagedData
