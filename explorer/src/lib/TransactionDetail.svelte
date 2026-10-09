@@ -1,4 +1,5 @@
 <script>
+    import { formatTime, formatAge } from '$lib/time.js'
     export let tx
 </script>
 <table class="card border-separate border-spacing-4 shadow-lg">
@@ -10,6 +11,10 @@
     <tr>
       <td>Finalized</td>
       <td><a class="btn color-block shadow-xl p-4" href="/block/{tx.block[0]}">Block {tx.blockHeight}</a></td>
+    </tr>
+    <tr>
+      <td>Time</td>
+      <td>{formatTime(tx.time)} {#if tx.time}<span class="opacity-60">({formatAge(tx.time)})</span>{/if}</td>
     </tr>
     <tr>
       <td>UTxOs</td>

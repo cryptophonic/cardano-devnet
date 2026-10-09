@@ -49,7 +49,23 @@ class ChainStore extends EventEmitter {
     this.latest = null
     this.tokenIndex = 1
     this.txIndex = 1
+    this.systemStart = null      // epoch ms of slot 0, from queryNetwork/startTime
+    this.eras = []               // ogmios eraSummaries, for slot length
     this.seedGenesis()
+  }
+
+  /**
+   * Wall-clock time of a slot, in epoch ms, or null before the chain's start
+   * time is known. Walks the era summaries rather than assuming one second a
+   * slot, so a chain whose slot length has ever changed still dates correctly.
+   */
+  slotTime(slot) {
+    if (this.systemStart === null || slot === undefined || slot === null) return null
+    let era = null
+    for (const e of this.eras) if (e.start.slot <= slot) era = e
+    if (era === null) return this.systemStart + slot * 1000
+    const length = era.parameters?.slotLength?.milliseconds ?? 1000
+    return this.systemStart + era.start.time.seconds * 1000 + (slot - era.start.slot) * length
   }
 
   address(addr) {
@@ -140,6 +156,7 @@ class ChainStore extends EventEmitter {
       signatories: tx.signatories,
       producedHeight: block.height,
       blockId: block.id,
+      slot: block.slot,
       inputs: tx.inputs.map(i => i.transaction.id + '#' + i.index),
       outputs: tx.outputs.map(o => o.address)
     }
@@ -202,18 +219,35 @@ function connect(store) {
   let nextId = 0
   const send = method => ws.send(JSON.stringify({ jsonrpc: '2.0', method: method, id: nextId++ }))
 
-  ws.on('open', () => {
-    store.reset()
+  // A slot is only a number until you know when slot zero was and how long a
+  // slot lasts, so both are asked for before the chain is followed. Blocks
+  // carry slots, not timestamps; this is the only way to date a transaction.
+  let pending = 2
+  const startSync = () => {
+    if (--pending > 0) return
     ws.send(JSON.stringify({
       jsonrpc: '2.0',
       method: 'findIntersection',
       params: { points: ['origin'] },
       id: nextId++
     }))
+  }
+
+  ws.on('open', () => {
+    store.reset()
+    pending = 2
+    send('queryNetwork/startTime')
+    send('queryLedgerState/eraSummaries')
   })
   ws.on('message', msg => {
     const response = JSON.parse(msg)
-    if (response.method === 'findIntersection') {
+    if (response.method === 'queryNetwork/startTime') {
+      store.systemStart = Date.parse(response.result)
+      startSync()
+    } else if (response.method === 'queryLedgerState/eraSummaries') {
+      store.eras = response.result ?? []
+      startSync()
+    } else if (response.method === 'findIntersection') {
       send('nextBlock')
     } else if (response.method === 'nextBlock') {
       const r = response.result

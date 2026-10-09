@@ -1,4 +1,5 @@
 <script>
+  import { formatTime, formatAge } from '$lib/time.js'
   export let block
 </script>
 <div class="flex justify-center mb-8">
@@ -24,6 +25,10 @@
     <tr>
       <td>Time Slot</td>
       <td>{block.slot}</td>
+    </tr>
+    <tr>
+      <td>Time</td>
+      <td>{formatTime(block.time)} {#if block.time}<span class="opacity-60">({formatAge(block.time)})</span>{/if}</td>
     </tr>
     <tr>
       <td>Transactions</td>

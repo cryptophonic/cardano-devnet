@@ -66,6 +66,7 @@ export function loadBlock(path) {
     height: block.height,
     page: block.page,
     slot: block.slot,
+    time: store.slotTime(block.slot),
     latest: store.latest.height,
     txs: txs
   }
@@ -110,9 +111,11 @@ export function loadTransaction(hash) {
   if (tx.blockId !== undefined) {
     tx.block = [tx.blockId, small_hash(tx.blockId)]
     tx.blockHeight = store.blocks.get(tx.blockId).height
+    tx.time = store.slotTime(tx.slot)
   } else {
     tx.block = ["genesis", "genesis"]
     tx.blockHeight = 0
+    tx.time = null // the seeded faucet UTxO predates the chain
   }
   tx.inputs = tx.inputs.map(input => {
     const [ intx, index ] = input.split("#")
