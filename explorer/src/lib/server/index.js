@@ -238,25 +238,37 @@ export function loadToken(policy, token) {
   // policy/token come straight off the URL, and a token the indexer has never
   // seen has no meta -- and so no placeholder-glyph index either.
   const meta = store.tokenMeta[policy]?.[token]
-  let count = 0
-  const pagedData = Object.keys(tokData).reduce((acc, addr) => {
-    let amt = tokData[addr]
-    amt = formatAmount(amt, policy, token)
-    if (count < 10) {
-      acc.push({
-        address: [addr, small_addr(addr)],
-        amount: amt,
-        alias: store.alias(addr)
-      })
-      count++
-    }
-    return acc
-  }, [])
+
+  // An address that spent its whole balance keeps its key at zero, so drop
+  // those: they are not holders, and they used to take places in the ten
+  // shown below from addresses that are.
+  const holders = Object.keys(tokData)
+    .filter(addr => tokData[addr] > 0)
+    .sort((a, b) => tokData[b] - tokData[a])
+
+  const shown = holders.slice(0, 10)
+
+  // The supply is read here rather than taken from the layout's header. The
+  // layout load has no parameters and does not re-run on client-side
+  // navigation, so its total is whatever was current when the page was last
+  // loaded in full — on a chain minting every few seconds that disagrees with
+  // this page's holders within moments, for no better reason than the two
+  // numbers being read at different times.
+  const supply = holders.reduce((sum, addr) => sum + tokData[addr], 0)
+
   return {
     logo: tokenLogo(policy, token, logo_lookup[(meta?.index ?? 0) % logo_lookup.length]),
     policy: policy,
     token: token,
-    ledger: pagedData
+    supply: formatAmount(supply, policy, token),
+    holderCount: holders.length,
+    // Say what is not being shown rather than truncating in silence.
+    omitted: holders.length - shown.length,
+    ledger: shown.map(addr => ({
+      address: [addr, small_addr(addr)],
+      amount: formatAmount(tokData[addr], policy, token),
+      alias: store.alias(addr)
+    }))
   }
 }
 
