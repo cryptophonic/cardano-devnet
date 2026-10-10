@@ -168,7 +168,13 @@ export function loadUtxo(hash, ref) {
           policy: [kpolicy, small_hash(kpolicy)],
           token: ktoken,
           logo: tokenLogo(kpolicy, ktoken, logo_lookup[store.tokenMeta[kpolicy][ktoken].index]),
-          amount: formatAmount(utxoData.value[kpolicy][ktoken], kpolicy, ktoken)
+          // ada keeps its raw lovelace figure here, as in flattenValue: it is
+          // formatted once below as utxo.ada. formatAmount is a string
+          // operation and is NOT idempotent -- applied twice it reads the "."
+          // it just inserted as a digit, turning 9.000000 into 9..000000.
+          amount: kpolicy === "ada"
+            ? utxoData.value[kpolicy][ktoken]
+            : formatAmount(utxoData.value[kpolicy][ktoken], kpolicy, ktoken)
         }
       })
       return acc
@@ -195,7 +201,10 @@ export function loadAddress(addr) {
         policy: [kpolicy, small_hash(kpolicy)],
         token: ktoken,
         logo: tokenLogo(kpolicy, ktoken, logo_lookup[store.tokenMeta[kpolicy][ktoken].index]),
-        amount: formatAmount(entry.ledger[kpolicy][ktoken], kpolicy, ktoken)
+        // Raw lovelace for ada; formatted once below as obj.ada. See loadUtxo.
+        amount: kpolicy === "ada"
+          ? entry.ledger[kpolicy][ktoken]
+          : formatAmount(entry.ledger[kpolicy][ktoken], kpolicy, ktoken)
       }
     })
     return acc
