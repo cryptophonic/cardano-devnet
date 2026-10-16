@@ -7,16 +7,39 @@
 // Rollback handling is truncate-by-replay: these chains never reorg (single
 // SPO devnet; a lone fork forges alone), so a RollBackward that actually
 // precedes our tip -- a reconnect intersection is the only expected one --
-// just drops the store and resyncs from origin rather than unwinding state.
+// just drops the store and resyncs from the start point rather than unwinding
+// state.
 //
 // OGMIOS_URL selects the node: the devnet's sidecar by default, or any run's
 // own ogmios (a fork, a snapshot clone) to browse that chain instead.
+//
+// CHAIN_SYNC_FROM picks where indexing starts, and defaults to origin: a
+// devnet replays from origin however long it has been up. Height is NOT a
+// default gate here. A devnet that has simply been running a while is still a
+// devnet -- the one on apollo passed 29000 blocks on six days of uptime and
+// would cross any six-figure threshold inside a month -- and silently
+// dropping its history at the next restart, weeks after whatever change
+// introduced the threshold, is worse than indexing from origin. Only a chain
+// that *inherited* millions of blocks needs bounding, which the chain itself
+// cannot tell you; the operator can. The values:
+//
+//   origin          replay everything (the default)
+//   tip             follow from the current tip, no history
+//   <slot>.<hash>   follow from a known point, e.g. a fork's fork.slot
+//   auto            origin below ORIGIN_SYNC_MAX_BLOCKS (default 100000),
+//                   the tip above it -- for a host that does not know in
+//                   advance which kind of chain it will be pointed at
+//
+// Outputs created before the start point are unknown to the index, so their
+// spends are skipped (applyTransaction already tolerates that).
 
 import fs from 'fs'
 import { WebSocket } from 'ws'
 import { EventEmitter } from 'events'
 
 const OGMIOS_URL = process.env.OGMIOS_URL ?? 'ws://localhost:1337'
+const CHAIN_SYNC_FROM = process.env.CHAIN_SYNC_FROM
+const ORIGIN_SYNC_MAX_BLOCKS = parseInt(process.env.ORIGIN_SYNC_MAX_BLOCKS ?? '100000')
 const GURU_ASSETS = process.env.CARDANO_CLI_GURU + '/assets'
 
 // Genesis constants - faucet initial utxo to seed all other tx's. The genesis
@@ -217,7 +240,16 @@ class ChainStore extends EventEmitter {
 function connect(store) {
   const ws = new WebSocket(OGMIOS_URL)
   let nextId = 0
-  const send = method => ws.send(JSON.stringify({ jsonrpc: '2.0', method: method, id: nextId++ }))
+  const send = (method, params) => {
+    const id = nextId++
+    ws.send(JSON.stringify({ jsonrpc: '2.0', method: method, params: params, id: id }))
+    return id
+  }
+  const intersect = point => send('findIntersection', { points: [point] })
+
+  // Which ids were the clock queries, so a rejection of one can be tolerated
+  // while a rejection of anything else reconnects (see the handler below).
+  const clockIds = new Set()
 
   // A slot is only a number until you know when slot zero was and how long a
   // slot lasts: blocks carry slots, not timestamps, so startTime and the era
@@ -231,27 +263,66 @@ function connect(store) {
   // hand. queryLedgerState needs acquired ledger state, which a node still
   // starting up has not got.
   const startSync = () => {
-    ws.send(JSON.stringify({
-      jsonrpc: '2.0',
-      method: 'findIntersection',
-      params: { points: ['origin'] },
-      id: nextId++
-    }))
+    if (CHAIN_SYNC_FROM === undefined || CHAIN_SYNC_FROM === 'origin') {
+      // the default: replay the whole chain, however long it has been up
+      intersect('origin')
+    } else if (CHAIN_SYNC_FROM === 'tip') {
+      send('queryNetwork/tip')
+    } else if (CHAIN_SYNC_FROM === 'auto') {
+      send('queryNetwork/blockHeight')
+    } else {
+      const [slot, id] = CHAIN_SYNC_FROM.split('.')
+      intersect({ slot: parseInt(slot), id: id })
+    }
   }
 
   ws.on('open', () => {
     store.reset()
-    send('queryNetwork/startTime')
-    send('queryLedgerState/eraSummaries')
+    clockIds.clear()
+    clockIds.add(send('queryNetwork/startTime'))
+    clockIds.add(send('queryLedgerState/eraSummaries'))
     startSync()
   })
   ws.on('message', msg => {
     const response = JSON.parse(msg)
+
+    // ogmios rejects a malformed request with a bare error and no `method`
+    // to dispatch on -- a CHAIN_SYNC_FROM hash of the wrong length or not in
+    // base16 arrives here, not in the findIntersection branch below (which
+    // only ever sees a well-formed point that simply is not on the chain).
+    // Without this the socket stays open and idle and nothing is ever
+    // indexed, so match on the id instead: the clock is optional and only
+    // costs timestamps, anything else means the sync never started.
+    if (response.method === undefined && response.error !== undefined) {
+      if (clockIds.has(response.id)) {
+        console.log(`chain: ogmios rejected a clock query (${response.error.message}); no times`)
+        return
+      }
+      console.log(`chain: ogmios rejected a request (${response.error.message}); retrying`)
+      ws.close()
+      return
+    }
+
     if (response.method === 'queryNetwork/startTime') {
       store.systemStart = Date.parse(response.result)
     } else if (response.method === 'queryLedgerState/eraSummaries') {
       store.eras = response.result ?? []
+    } else if (response.method === 'queryNetwork/blockHeight') {
+      const height = response.result
+      if (height === 'origin' || height <= ORIGIN_SYNC_MAX_BLOCKS) {
+        intersect('origin')
+      } else {
+        console.log(`chain: ${height} blocks at ${OGMIOS_URL}; indexing from the tip, not origin`)
+        send('queryNetwork/tip')
+      }
+    } else if (response.method === 'queryNetwork/tip') {
+      intersect(response.result)
     } else if (response.method === 'findIntersection') {
+      if (response.error !== undefined) {
+        console.log(`chain: no intersection at ${CHAIN_SYNC_FROM} (${response.error.message}); retrying`)
+        ws.close()
+        return
+      }
       send('nextBlock')
     } else if (response.method === 'nextBlock') {
       const r = response.result
@@ -259,7 +330,8 @@ function connect(store) {
         store.applyBlock(r.block)
       } else if (r.point !== 'origin' && store.latest && r.point.slot < store.latest.slot) {
         // a rollback behind our tip: truncate by replay -- reconnect resyncs
-        // from origin (never expected on a single-SPO devnet or a lone fork)
+        // from the start point (never expected on a single-SPO devnet or a
+        // lone fork)
         ws.close()
         return
       }
