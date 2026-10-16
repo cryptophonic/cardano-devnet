@@ -220,11 +220,17 @@ function connect(store) {
   const send = method => ws.send(JSON.stringify({ jsonrpc: '2.0', method: method, id: nextId++ }))
 
   // A slot is only a number until you know when slot zero was and how long a
-  // slot lasts, so both are asked for before the chain is followed. Blocks
-  // carry slots, not timestamps; this is the only way to date a transaction.
-  let pending = 2
+  // slot lasts: blocks carry slots, not timestamps, so startTime and the era
+  // summaries are what date a transaction. They are asked for here but NOT
+  // waited on. slotTime runs when a page is read, never when a block is
+  // indexed, so a block that arrives first loses nothing -- it dates
+  // correctly on every load once the answers land. Waiting cost more than it
+  // bought: an ogmios error response carries no `method` field, so a failed
+  // query matched no branch below, a readiness counter never reached zero,
+  // and the socket sat open and idle indexing nothing until restarted by
+  // hand. queryLedgerState needs acquired ledger state, which a node still
+  // starting up has not got.
   const startSync = () => {
-    if (--pending > 0) return
     ws.send(JSON.stringify({
       jsonrpc: '2.0',
       method: 'findIntersection',
@@ -235,18 +241,16 @@ function connect(store) {
 
   ws.on('open', () => {
     store.reset()
-    pending = 2
     send('queryNetwork/startTime')
     send('queryLedgerState/eraSummaries')
+    startSync()
   })
   ws.on('message', msg => {
     const response = JSON.parse(msg)
     if (response.method === 'queryNetwork/startTime') {
       store.systemStart = Date.parse(response.result)
-      startSync()
     } else if (response.method === 'queryLedgerState/eraSummaries') {
       store.eras = response.result ?? []
-      startSync()
     } else if (response.method === 'findIntersection') {
       send('nextBlock')
     } else if (response.method === 'nextBlock') {
