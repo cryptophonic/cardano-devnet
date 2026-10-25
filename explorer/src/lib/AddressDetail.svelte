@@ -75,9 +75,9 @@
       <tr>
         <td>Unspent UTxOs</td>
         <td>
-          <div class="flex flex-wrap">
+          <div class="flex flex-wrap gap-2">
             {#each addr.unspent as utxo}
-              <a class="btn color-unspent-utxo mr-2 shadow-xl" href="/utxo/{utxo.id[0]}/{utxo.ref}">{utxo.id[1]}#{utxo.ref}</a>
+              <a class="btn color-unspent-utxo shadow-xl" href="/utxo/{utxo.id[0]}/{utxo.ref}">{utxo.id[1]}#{utxo.ref}</a>
             {/each}
           </div>
         </td>
